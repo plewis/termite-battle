@@ -4,6 +4,8 @@ Bayesian version of the model described in
 >E. Adams and M. Mesterton-Gibbons. 2003. Lanchester’s attrition models 
 and fights among social animals. Behavioral Ecology 14:719-723.
 
+This software was developed to support a manuscript in development (first author [Elizabeth Clifton](mailto:elizabeth.clifton@uconn.edu)). More details about how this program can be used will be added once the paper has been submitted.
+
 ## Compiling
 
 The program requires that the [Boost](https://www.boost.org) libraries program_options and filesystem be compiled. This can be done using the commands
