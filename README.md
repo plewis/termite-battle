@@ -8,24 +8,25 @@ This software was developed to support a manuscript in development (first author
 
 ## Compiling
 
-The program requires that the [Boost](https://www.boost.org) libraries program_options and filesystem be compiled. This can be done using the commands
+The program requires that the [Boost](https://www.boost.org) libraries `program_options` and `filesystem` be compiled. Assuming that Boost was installed at *$HOME/boost_1_73_0*, the commands below can be used to compile these libraries:
 
+    cd $HOME/boost_1_73_0
     ./bootstrap.sh --with-toolset=gcc --with-libraries=program_options,filesystem
     ./b2 cxxflags="-std=c++11"
 
-Assuming that Boost was installed at *$HOME/boost_1_73_0*, the libraries will be located in *$HOME/boost_1_73_0/stage/lib*. If you've used a newer version of Boost, modify the _src/build.sh_ file accordingly.
+The libraries will be located in *$HOME/boost_1_73_0/stage/lib*. If you're using a newer version of Boost, modify the lines above and those in _src/build.sh_ file accordingly.
 
-Build using the command
+Assuming you've cloned this repository into $HOME/termite-battle, build the termite battle program using the command
 
-    cd src
+    cd $HOME/termite-battle/src
     . build.sh
 
 If compiled and linked successfully, the program will be at _src/tb_.
 
-Run 
+Run the following to see command line options:
 
-    ./tb --help to see command line options.
-
+    ./tb --help
+    
 ## Data file format
 
 There is an example directory containing a _example.dat_ file (containing the data for two battles) and _battle.conf_ (the control file used by the program). All options listed by running the help command (see above) can be used in the _battle.conf_ file to avoid long command line invocations.
@@ -63,7 +64,7 @@ The subsequent lines contain three numbers: the time, the number of individuals 
 
 ## Configuration file format
 
-The example configuration file provided, _battle.conf_, contains all possible program options, but many are commented out:
+The example configuration file provided, _battle.conf_, contains some of the possible program options. Note that everything after a `#` character is treated as a comment:
 
     datafile    = example.dat  # name of the data file to read
     outfile     = test         # prefix used in output file names
