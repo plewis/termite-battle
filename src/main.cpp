@@ -59,7 +59,7 @@
 
 std::string     program_name          = "termitebattle";
 unsigned        major_version         = 1;
-unsigned        minor_version         = 8;
+unsigned        minor_version         = 9;
 
 #if defined(USE_REGRESSION_MODEL)
 std::string     model_name            = "Binomial Regression Model";
@@ -91,6 +91,10 @@ std::string     model_name            = "ODE Model";
 //    - these plots are directly comparable to the plots produced by the RSTAN files
 //      for the regression model
 //    - removed unnecessary boost::str wrapper from around boost::format() whereever possible
+// v1.9 (26-Dec-2020)
+//    - added Gelfand-Ghosh (1998) posterior predictive (squared-error loss) model selection to both regression and ODE model
+//    - modified stan code (removed binomial coefficients) so that marginal likelihoods in the regression
+//      models would be comparable to those in the Eldridge model
 
 // Output-related
 bool do_save_output = true;
@@ -902,6 +906,19 @@ void saveRSTAN() {
     rstanf << "\n";
     rstanf << "outnumber <- log(termite_data$n1) - log(termite_data$n0)\n";
     rstanf << "\n";
+    rstanf << "t <- function(y,n) {\n";
+    rstanf << "    if (y == 0 || y == n) {\n";
+    rstanf << "        0.0\n";
+    rstanf << "    }\n";
+    rstanf << "    else {\n";
+    rstanf << "        (y/n)*log(y/n) + (1 - y/n)*log(1 - y/n)\n";
+    rstanf << "    }\n";
+    rstanf << "}\n";
+    rstanf << "tvect <- Vectorize(t)\n";
+    rstanf << "\n";
+    rstanf << "ggP <- 0.0\n";
+    rstanf << "ggG <- 0.0\n";
+    rstanf << "ggk <- 1.0\n";
     rstanf << "first_epoch <- 1\n";
     rstanf << "for (j in 1:J) {\n";
     rstanf << "    last_epoch <- first_epoch + K[j] - 1\n";
@@ -928,15 +945,32 @@ void saveRSTAN() {
     rstanf << "    \n";
     rstanf << "    # deaths in group 0 over all epochs in current battle\n";
     rstanf << "    d0 <- c()\n";
+    rstanf << "    a0 <- c()\n";
     rstanf << "    for (epoch in first_epoch:last_epoch) {\n";
     rstanf << "        n0 <- rep(termite_data$n0[[epoch]], sample_size)\n";
     rstanf << "        logitp0 <- param$beta0 - outnumber[[epoch]]*param$beta3\n";
     rstanf << "        p0 <- exp(logitp0)/(1 + exp(logitp0))\n";
     rstanf << "        if (postpred) {\n";
+    rstanf << "            ggy0    <- termite_data$y0[epoch]\n";
+    rstanf << "            ggn0    <- termite_data$n0[epoch]\n";
     rstanf << "            deaths0 <- rbinom(sample_size, n0, p0)\n";
+    rstanf << "            d0squared <- deaths0*deaths0\n";
+    //rstanf << "            ggt     <- sum(tvect(deaths0, ggn0))/sample_size\n";
+    rstanf << "            ggmu    <- sum(deaths0)/sample_size\n";
+    rstanf << "            ggmusq    <- sum(d0squared)\n";
+    rstanf << "            ggvar    <- (sum(d0squared) - sample_size*ggmu*ggmu)/(sample_size - 1)\n";
+    //rstanf << "            ggtmu   <- t(ggmu, ggn0)\n";
+    //rstanf << "            ggty    <- t(ggy0, ggn0)\n";
+    //rstanf << "            ggtavg  <- t((ggmu + ggy0)/(ggk+1), ggn0)\n";
+    //rstanf << "            ggP     <- ggP + 2*ggn0*(ggt - ggtmu)\n";
+    //rstanf << "            ggG     <- ggG + 2*ggn0*((ggtmu - ggty)/(ggk+1) - ggtavg)\n";
+    rstanf << "            ggP     <- ggP + ggvar\n";
+    rstanf << "            ggG     <- ggG + (ggmu - ggy0)*(ggmu - ggy0)\n";
+    rstanf << "            a0      <- c(a0, (ggmu + ggk*ggy0)/(ggk+1))\n";
     rstanf << "        }\n";
     rstanf << "        else {\n";
     rstanf << "            deaths0 <- p0*n0\n";
+    rstanf << "            a0      <- c(a0, deaths0)  # not used\n";
     rstanf << "        }\n";
     rstanf << "        d0 <- c(d0, deaths0)\n";
     rstanf << "    }\n";
@@ -947,23 +981,30 @@ void saveRSTAN() {
     rstanf << "        colony = rep(colony0[j], K[j]*sample_size)\n";
     rstanf << "    )\n";
     rstanf << "    \n";
-    rstanf << "    line_data_0 <- data.frame(\n";
+    rstanf << "    y_data_0 <- data.frame(\n";
     rstanf << "        obs = rep(colony0[j], K[j]),\n";
     rstanf << "        x = seq(1,K[j],1),\n";
     rstanf << "        y = termite_data$y0[first_epoch:last_epoch]\n";
     rstanf << "    )\n";
     rstanf << "    \n";
-    rstanf << "    p <- ggplot()\n";
+    rstanf << "    a_data_0 <- data.frame(\n";
+    rstanf << "        obs = rep(colony0[j], K[j]),\n";
+    rstanf << "        x = seq(1,K[j],1),\n";
+    rstanf << "        y = a0\n";
+    rstanf << "    )\n";
+    rstanf << "    \n";
+    rstanf << "    p <- ggplot() + theme(legend.position = \"none\")\n";
     rstanf << "    if (postpred) {\n";
     rstanf << "        p <- p + geom_boxplot(data=violin_data_0, fill=\"brown\", aes(x=name, y=value))\n";
     rstanf << "    }\n";
     rstanf << "    else {\n";
     rstanf << "        p <- p + geom_violin(data=violin_data_0, fill=\"brown\", aes(x=name, y=value))\n";
     rstanf << "    }\n";
-    rstanf << "    p <- p + geom_line(data=line_data_0, color=\"orange\", aes(x=x, y=y))\n";
-    rstanf << "    p <- p + geom_point(data=line_data_0, color=\"orange\", aes(x=x, y=y))\n";
+    rstanf << "    p <- p + geom_line(data=y_data_0, color=\"orange\", aes(x=x, y=y))\n";
+    rstanf << "    p <- p + geom_point(data=y_data_0, color=\"orange\", aes(x=x, y=y))\n";
     if (stan == "equal") {
         rstanf << "    if (postpred) {\n";
+        rstanf << "        p <- p + geom_point(data=a_data_0, color=\"yellow\", aes(x=x, y=y, size=2, shape=\"circle plus\")) + scale_shape_identity()\n";
         rstanf << "        p <- p + labs(title=sprintf(\"Battle %d (%s, start=%d, equal model, post. pred.)\",\n";
         rstanf << "                battle_id[j],\n";
         rstanf << "                colony0[j],\n";
@@ -980,6 +1021,7 @@ void saveRSTAN() {
     }
     else {
         rstanf << "    if (postpred) {\n";
+        rstanf << "        p <- p + geom_point(data=a_data_0, color=\"yellow\", aes(x=x, y=y, size=2, shape=\"circle plus\")) + scale_shape_identity()\n";
         rstanf << "        p <- p + labs(title=sprintf(\"Battle %d (%s, start=%d, full model, post. pred.)\",\n";
         rstanf << "                battle_id[j],\n";
         rstanf << "                colony0[j],\n";
@@ -1013,6 +1055,7 @@ void saveRSTAN() {
     rstanf << "    \n";
     rstanf << "    # deaths in group 1 over all epochs in current battle\n";
     rstanf << "    d1 <- c()\n";
+    rstanf << "    a1 <- c()\n";
     rstanf << "    for (epoch in first_epoch:last_epoch) {\n";
     rstanf << "        n1 <- rep(termite_data$n1[[epoch]], sample_size)\n";
     if (stan == "equal")
@@ -1021,10 +1064,26 @@ void saveRSTAN() {
         rstanf << "            logitp1 <- param$beta1 + outnumber[[epoch]]*param$beta3\n";
     rstanf << "        p1 <- exp(logitp1)/(1 + exp(logitp1))\n";
     rstanf << "        if (postpred) {\n";
+    rstanf << "            ggy1    <- termite_data$y1[epoch]\n";
+    rstanf << "            ggn1    <- termite_data$n1[epoch]\n";
     rstanf << "            deaths1 <- rbinom(sample_size, n1, p1)\n";
+    rstanf << "            d1squared <- deaths1*deaths1\n";
+    //rstanf << "            ggt     <- sum(tvect(deaths1, ggn1))/sample_size\n";
+    rstanf << "            ggmu    <- sum(deaths1)/sample_size\n";
+    rstanf << "            ggmusq    <- sum(d1squared)\n";
+    rstanf << "            ggvar    <- (sum(d1squared) - sample_size*ggmu*ggmu)/(sample_size - 1.0)\n";
+    //rstanf << "            ggtmu   <- t(ggmu, ggn1)\n";
+    //rstanf << "            ggty    <- t(ggy1, ggn1)\n";
+    //rstanf << "            ggtavg  <- t((ggmu + ggy1)/(ggk+1), ggn1)\n";
+    //rstanf << "            ggP     <- ggP + 2*ggn1*(ggt - ggtmu)\n";
+    //rstanf << "            ggG     <- ggG + 2*ggn1*((ggtmu - ggty)/(ggk+1) - ggtavg)\n";
+    rstanf << "            ggP     <- ggP + ggvar\n";
+    rstanf << "            ggG     <- ggG + (ggmu - ggy1)*(ggmu - ggy1)\n";
+    rstanf << "            a1      <- c(a1, (ggmu + ggk*ggy1)/(ggk+1))\n";
     rstanf << "        }\n";
     rstanf << "        else {\n";
     rstanf << "            deaths1 <- p1*n1\n";
+    rstanf << "            a1      <- c(a1, deaths1)  # not used\n";
     rstanf << "        }\n";
     rstanf << "        d1 <- c(d1, deaths1)\n";
     rstanf << "    }\n";
@@ -1035,23 +1094,30 @@ void saveRSTAN() {
     rstanf << "        colony = rep(colony1[j], K[j]*sample_size)\n";
     rstanf << "    )\n";
     rstanf << "    \n";
-    rstanf << "    line_data_1 <- data.frame(\n";
+    rstanf << "    y_data_1 <- data.frame(\n";
     rstanf << "        obs = rep(colony1[j], K[j]),\n";
     rstanf << "        x = seq(1,K[j],1),\n";
     rstanf << "        y = termite_data$y1[first_epoch:last_epoch]\n";
     rstanf << "    )\n";
     rstanf << "    \n";
-    rstanf << "    p <- ggplot()\n";
+    rstanf << "    a_data_1 <- data.frame(\n";
+    rstanf << "        obs = rep(colony0[j], K[j]),\n";
+    rstanf << "        x = seq(1,K[j],1),\n";
+    rstanf << "        y = a1\n";
+    rstanf << "    )\n";
+    rstanf << "    \n";
+    rstanf << "    p <- ggplot() + theme(legend.position = \"none\")\n";
     rstanf << "    if (postpred) {\n";
     rstanf << "        p <- p + geom_boxplot(data=violin_data_1, fill=\"brown\", aes(x=name, y=value))\n";
     rstanf << "    }\n";
     rstanf << "    else {\n";
     rstanf << "        p <- p + geom_violin(data=violin_data_1, fill=\"brown\", aes(x=name, y=value))\n";
     rstanf << "    }\n";
-    rstanf << "    p <- p + geom_line(data=line_data_1, color=\"orange\", aes(x=x, y=y))\n";
-    rstanf << "    p <- p + geom_point(data=line_data_1, color=\"orange\", aes(x=x, y=y))\n";
+    rstanf << "    p <- p + geom_line(data=y_data_1, color=\"orange\", aes(x=x, y=y))\n";
+    rstanf << "    p <- p + geom_point(data=y_data_1, color=\"orange\", aes(x=x, y=y))\n";
     if (stan == "equal") {
         rstanf << "    if (postpred) {\n";
+        rstanf << "        p <- p + geom_point(data=a_data_1, color=\"yellow\", aes(x=x, y=y, size=2, shape=\"circle plus\")) + scale_shape_identity()\n";
         rstanf << "        p <- p + labs(title=sprintf(\"Battle %d (%s, start=%d, equal model, post. pred.)\",\n";
         rstanf << "                battle_id[j],\n";
         rstanf << "                colony1[j],\n";
@@ -1068,6 +1134,7 @@ void saveRSTAN() {
     }
     else {
         rstanf << "    if (postpred) {\n";
+        rstanf << "        p <- p + geom_point(data=a_data_1, color=\"yellow\", aes(x=x, y=y, size=2, shape=\"circle plus\")) + scale_shape_identity()\n";
         rstanf << "        p <- p + labs(title=sprintf(\"Battle %d (%s, start=%d, full model, post. pred.)\",\n";
         rstanf << "                battle_id[j],\n";
         rstanf << "                colony1[j],\n";
@@ -1087,6 +1154,11 @@ void saveRSTAN() {
     rstanf << "    \n";
     rstanf << "    first_epoch <- last_epoch + 1\n";
     rstanf << "}\n";
+    rstanf << "\n";
+    rstanf << "print(sprintf(\"GGp = %.5f\", ggP))\n";
+    rstanf << "print(sprintf(\"GGg = %.5f\", ggG))\n";
+    //rstanf << "print(sprintf(\"GG = GGp + 2 GGg = %.5f\", ggP + 2*ggG))\n";
+    rstanf << "print(sprintf(\"GG = GGp + (%g) GGg = %.5f\", ggk/(ggk+1), ggP + ggk*ggG/(ggk + 1)))\n";
 
     rstanf.close();
     consoleOutput(boost::format("RSTAN file \"%s\" saved.\n") % output_file_name);
@@ -1149,6 +1221,10 @@ void saveSTAN() {
         stanf << "            target += binomial_logit_lpmf(y1[i] | n1prev, beta1 + beta3 * phi);\n";
     }
     stanf << "\n";
+    stanf << "            // remove binomial coefficients to make marginal likelihood comparable to the Eldridge model\n";
+    stanf << "            target += lgamma(y0[i] + 1.0) + lgamma(n0prev - y0[i] + 1.0) - lgamma(n0prev + 1);\n";
+    stanf << "            target += lgamma(y1[i] + 1.0) + lgamma(n1prev - y1[i] + 1.0) - lgamma(n1prev + 1);\n";
+    stanf << "\n";
     stanf << "            y0prev = y0[i];\n";
     stanf << "            y1prev = y1[i];\n";
     stanf << "\n";
@@ -1161,6 +1237,13 @@ void saveSTAN() {
     stanf << "}\n";
     stanf.close();
     consoleOutput(boost::format("STAN model file \"%s\" saved.\n") % output_file_name);
+}
+
+double t(double y, unsigned n) {
+    if (y == 0.0 || y == n) {
+        return 0.0;
+    }
+    return (y/n)*log(y/n) + (1.0 - y/n)*log(1.0 - y/n);
 }
 
 void savePostPredPlotsRFiles() {
@@ -1184,25 +1267,36 @@ void savePostPredPlotsRFiles() {
         
         // Store observed number of deaths for group 0 (group 1) in y0vect (y1vect)
         std::vector<std::string> y0vect, y1vect;
+        std::vector<double> y0, y1;
+        std::vector<unsigned> n0, n1;
         auto epoch = battle_epochs.begin();
         unsigned mprev = (unsigned)std::get<1>(*epoch);
         unsigned nprev = (unsigned)std::get<2>(*epoch);
         for (epoch++; epoch != battle_epochs.end(); epoch++) {
             unsigned m = (unsigned)std::get<1>(*epoch);
             unsigned n = (unsigned)std::get<2>(*epoch);
+            n0.push_back(mprev);
+            n1.push_back(nprev);
+            y0.push_back(mprev - m);
+            y1.push_back(nprev - n);
             y0vect.push_back(std::to_string(mprev - m));
             y1vect.push_back(std::to_string(nprev - n));
             mprev = m;
             nprev = n;
         }
         
+        //####################### GG ######################
+        double ggP = 0.0;
+        double ggG = 0.0;
+        double ggk = 1.0;
+        
         //####################### group 0 ######################
         // Open file for group 0
         std::string colony_name = battles[battle_id].first;
-        std::string fnprefix0 = boost::str(boost::format("%s-ode-battle-%d-%s-postpred.") % output_file_prefix % battle_id % colony_name);
-        std::ofstream outf0(fnprefix0 + std::string("R"));
+        std::string fnprefix0 = boost::str(boost::format("%s-ode-battle-%d-%s-postpred") % output_file_prefix % battle_id % colony_name);
+        std::ofstream outf0(fnprefix0 + std::string(".R"));
         
-        shellf << boost::format("rscript %s\n") % (fnprefix0 + std::string("R"));
+        shellf << boost::format("rscript %s\n") % (fnprefix0 + std::string(".R"));
 
         unsigned nominal_sample_size = 0;
         unsigned actual_sample_size = 0;
@@ -1212,22 +1306,56 @@ void savePostPredPlotsRFiles() {
         outf0 << "\n";
         outf0 << "library(ggplot2)\n";
         outf0 << "\n";
-        outf0 << boost::format("pdf(\"%s\")\n") % (fnprefix0 + std::string("pdf"));
+        outf0 << boost::format("pdf(\"%s\")\n") % (fnprefix0 + std::string(".pdf"));
         outf0 << "\n";
         outf0 << "f <- c()\n";
         outf0 << "d0 <- c()\n";
+        std::vector<std::string> a0vect;
         for (unsigned epoch = 0; epoch < nepochs; epoch++) {
             post_pred_deaths_t tmp;
             tmp.reserve(post_pred_data0[battle_index][epoch].size());
             for (auto it = post_pred_data0[battle_index][epoch].begin(); it != post_pred_data0[battle_index][epoch].end(); it++) {
-                if (*it > -0.5)
+                if (*it > -0.5) {
+                    // -1 indicates fail, so, if here, must have worked
                     tmp.push_back(*it);
+                }
             }
+
             nominal_sample_size += (unsigned)post_pred_data0[battle_index][epoch].size();
             actual_sample_size += (unsigned)tmp.size();
             outf0 << boost::format("f <- c(f, rep(%d, %d))\n") % epoch % tmp.size();
-            outf0 << boost::format("d0 <- c(d0, c(%s))\n") % boost::algorithm::join(post_pred_data0[battle_index][epoch]
+            outf0 << boost::format("d0 <- c(d0, c(%s))\n") % boost::algorithm::join(tmp
                 | boost::adaptors::transformed([](double d) {return std::to_string(d);}), ",");
+
+            // GG calculations
+            unsigned ggsize = (unsigned)tmp.size();
+            assert(ggsize > 1);
+            //double ggt = 0.0;
+            double ggmu = 0.0;
+            double ggmusq = 0.0;
+            for (auto it = tmp.begin(); it != tmp.end(); it++) {
+                double d = *it;
+                //ggt += t(d, n0[epoch]);
+                ggmu += d;
+                ggmusq += d*d;
+            }
+            //ggt /= ggsize;
+            ggmu /= ggsize;
+            double ggvar = (ggmusq - ggsize*ggmu*ggmu)/(ggsize - 1);
+            //ggP += 2.0*n0[epoch]*(ggt - t(ggmu, n0[epoch]));
+            ggP += ggvar;
+
+            double gga = (ggmu + ggk*y0[epoch])/(ggk + 1.0);
+            a0vect.push_back(boost::str(boost::format("%.5f") % gga));
+            
+            //double ggG1 = t(ggmu, n0[epoch]);
+            //double ggG2 = t(y0[epoch], n0[epoch]);
+            //double ggG3 = t((ggmu + y0[epoch])/(ggk + 1.0), n0[epoch]);
+            //ggG += 2.0*n0[epoch]*((ggG1 - ggG2)/(ggk + 1.0) - ggG3);
+            ggG += (ggmu - y0[epoch])*(ggmu - y0[epoch]);
+
+            std::cerr << boost::format("\n~~> group 0, epoch %d: mu = %.5f, y = %.5f, a = %.5f\n")
+                % epoch % ggmu % y0[epoch] % gga;
         }
         outf0 << "\n";
         
@@ -1239,16 +1367,23 @@ void savePostPredPlotsRFiles() {
         outf0 << boost::format("   colony = rep(\"%s\", %d)\n") % colony_name  % actual_sample_size;
         outf0 << ")\n";
         outf0 << "\n";
-        outf0 << "line_data_0 <- data.frame(\n";
+        outf0 << "y_data_0 <- data.frame(\n";
         outf0 << boost::format("   obs = rep(\"%s\", %d),\n") % colony_name % nepochs;
         outf0 << boost::format("   x = seq(1,%d,1),\n") % nepochs;
         outf0 << boost::format("   y = c(%s)\n") % boost::algorithm::join(y0vect,",");
         outf0 << ")\n";
         outf0 << "\n";
-        outf0 << "p <- ggplot()\n";
+        outf0 << "a_data_0 <- data.frame(\n";
+        outf0 << boost::format("   obs = rep(\"%s\", %d),\n") % colony_name % nepochs;
+        outf0 << boost::format("   x = seq(1,%d,1),\n") % nepochs;
+        outf0 << boost::format("   y = c(%s)\n") % boost::algorithm::join(a0vect,",");
+        outf0 << ")\n";
+        outf0 << "\n";
+        outf0 << "p <- ggplot() + theme(legend.position = \"none\")\n";
         outf0 << "p <- p + geom_boxplot(data=violin_data_0, fill=\"brown\", aes(x=name, y=value))\n";
-        outf0 << "p <- p + geom_line(data=line_data_0, color=\"orange\", aes(x=x, y=y))\n";
-        outf0 << "p <- p + geom_point(data=line_data_0, color=\"orange\", aes(x=x, y=y))\n";
+        outf0 << "p <- p + geom_line(data=y_data_0, color=\"orange\", aes(x=x, y=y))\n";
+        outf0 << "p <- p + geom_point(data=y_data_0, color=\"orange\", aes(x=x, y=y))\n";
+        outf0 << "p <- p + geom_point(data=a_data_0, color=\"yellow\", aes(x=x, y=y, size=2, shape=\"circle plus\")) + scale_shape_identity()\n";
         outf0 << "p <- p + labs(title=sprintf(\"Battle %d (%s, start=%d, ODE model, post. pred., %% dropped = %.1f)\",\n";
         outf0 << boost::format("    %d,\n") % battle_id;
         outf0 << boost::format("    \"%s\",\n") % colony_name;
@@ -1263,7 +1398,7 @@ void savePostPredPlotsRFiles() {
         outf0.close();
 
         // Open text file to store data for viewing in programs other than R
-        std::ofstream outf0txt(fnprefix0 + std::string("txt"));
+        std::ofstream outf0txt(fnprefix0 + std::string(".txt"));
         outf0txt << "obs\tepoch\tpostpred\n";
         unsigned obs0 = 0;
         for (unsigned epoch = 0; epoch < nepochs; epoch++) {
@@ -1276,10 +1411,10 @@ void savePostPredPlotsRFiles() {
         //####################### group 1 ######################
         // Open file for group 1
         colony_name = battles[battle_id].second;
-        std::string fnprefix1 = boost::str(boost::format("%s-ode-battle-%d-%s-postpred.") % output_file_prefix % battle_id % colony_name);
-        std::ofstream outf1(fnprefix1 + std::string("R"));
+        std::string fnprefix1 = boost::str(boost::format("%s-ode-battle-%d-%s-postpred") % output_file_prefix % battle_id % colony_name);
+        std::ofstream outf1(fnprefix1 + std::string(".R"));
         
-        shellf << boost::format("rscript %s\n") % (fnprefix1 + std::string("R"));
+        shellf << boost::format("rscript %s\n") % (fnprefix1 + std::string(".R"));
 
         nominal_sample_size = 0;
         actual_sample_size = 0;
@@ -1289,22 +1424,56 @@ void savePostPredPlotsRFiles() {
         outf1 << "\n";
         outf1 << "library(ggplot2)\n";
         outf1 << "\n";
-        outf1 << boost::format("pdf(\"%s\")\n") % (fnprefix1 + std::string("pdf"));
+        outf1 << boost::format("pdf(\"%s\")\n") % (fnprefix1 + std::string(".pdf"));
         outf1 << "\n";
         outf1 << "f <- c()\n";
         outf1 << "d1 <- c()\n";
+        std::vector<std::string> a1vect;
         for (unsigned epoch = 0; epoch < nepochs; epoch++) {
             post_pred_deaths_t tmp;
             tmp.reserve(post_pred_data1[battle_index][epoch].size());
             for (auto it = post_pred_data1[battle_index][epoch].begin(); it != post_pred_data1[battle_index][epoch].end(); it++) {
-                if (*it > -0.5)
+                if (*it > -0.5) {
+                    // -1 indicates fail, so, if here, value is ok
                     tmp.push_back(*it);
+                }
             }
-            nominal_sample_size += (unsigned)post_pred_data0[battle_index][epoch].size();
+
+            nominal_sample_size += (unsigned)post_pred_data1[battle_index][epoch].size();
             actual_sample_size += (unsigned)tmp.size();
             outf1 << boost::format("f <- c(f, rep(%d, %d))\n") % epoch % tmp.size();
             outf1 << boost::format("d1 <- c(d1, c(%s))\n") % boost::algorithm::join(tmp
                 | boost::adaptors::transformed([](double d) {return std::to_string(d);}), ",");
+
+            // GG calculations
+            unsigned ggsize = (unsigned)tmp.size();
+            assert(ggsize > 1);
+            //double ggt = 0.0;
+            double ggmu = 0.0;
+            double ggmusq = 0.0;
+            for (auto it = tmp.begin(); it != tmp.end(); it++) {
+                double d = *it;
+                //ggt += t(d, n1[epoch]);
+                ggmu += d;
+                ggmusq += d*d;
+            }
+            //ggt /= ggsize;
+            ggmu /= ggsize;
+            double ggvar = (ggmusq - ggsize*ggmu*ggmu)/(ggsize - 1.0);
+            //ggP += 2.0*n1[epoch]*(ggt - t(ggmu, n1[epoch]));
+            ggP += ggvar;
+
+            double gga = (ggmu + ggk*y1[epoch])/(ggk + 1.0);
+            a1vect.push_back(boost::str(boost::format("%.5f") % gga));
+            
+            //double ggG1 = t(ggmu, n1[epoch]);
+            //double ggG2 = t(y1[epoch], n1[epoch]);
+            //double ggG3 = t((ggmu + y1[epoch])/(ggk + 1.0), n1[epoch]);
+            //ggG += 2.0*n1[epoch]*( (ggG1 - ggG2)/(ggk + 1.0) - ggG3);
+            ggG += (ggmu - y1[epoch])*(ggmu - y1[epoch]);
+
+            std::cerr << boost::format("\n~~> group 1, epoch %d: mu = %.5f, y = %.5f, a = %.5f\n")
+                % epoch % ggmu % y1[epoch] % gga;
         }
         outf1 << "\n";
         
@@ -1316,16 +1485,23 @@ void savePostPredPlotsRFiles() {
         outf1 << boost::format("   colony = rep(\"%s\", %d)\n") % colony_name % actual_sample_size;
         outf1 << ")\n";
         outf1 << "\n";
-        outf1 << "line_data_1 <- data.frame(\n";
+        outf1 << "y_data_1 <- data.frame(\n";
         outf1 << boost::format("   obs = rep(\"%s\", %d),\n") % colony_name % nepochs;
         outf1 << boost::format("   x = seq(1,%d,1),\n") % nepochs;
         outf1 << boost::format("   y = c(%s)\n") % boost::algorithm::join(y1vect,",");
         outf1 << ")\n";
         outf1 << "\n";
-        outf1 << "p <- ggplot()\n";
+        outf1 << "a_data_1 <- data.frame(\n";
+        outf1 << boost::format("   obs = rep(\"%s\", %d),\n") % colony_name % nepochs;
+        outf1 << boost::format("   x = seq(1,%d,1),\n") % nepochs;
+        outf1 << boost::format("   y = c(%s)\n") % boost::algorithm::join(a1vect,",");
+        outf1 << ")\n";
+        outf1 << "\n";
+        outf1 << "p <- ggplot() + theme(legend.position = \"none\")\n";
         outf1 << "p <- p + geom_boxplot(data=violin_data_1, fill=\"brown\", aes(x=name, y=value))\n";
-        outf1 << "p <- p + geom_line(data=line_data_1, color=\"orange\", aes(x=x, y=y))\n";
-        outf1 << "p <- p + geom_point(data=line_data_1, color=\"orange\", aes(x=x, y=y))\n";
+        outf1 << "p <- p + geom_line(data=y_data_1, color=\"orange\", aes(x=x, y=y))\n";
+        outf1 << "p <- p + geom_point(data=y_data_1, color=\"orange\", aes(x=x, y=y))\n";
+        outf1 << "p <- p + geom_point(data=a_data_1, color=\"yellow\", aes(x=x, y=y, size=2, shape=\"circle plus\")) + scale_shape_identity()\n";
         outf1 << "p <- p + labs(title=sprintf(\"Battle %d (%s, start=%d, ODE model, post. pred., %% dropped = %.1f)\",\n";
         outf1 << boost::format("    %d,\n") % battle_id;
         outf1 << boost::format("    \"%s\",\n") % colony_name;
@@ -1340,7 +1516,7 @@ void savePostPredPlotsRFiles() {
         outf1.close();
 
         // Open text file to store data for viewing in programs other than R
-        std::ofstream outf1txt(fnprefix1 + std::string("txt"));
+        std::ofstream outf1txt(fnprefix1 + std::string(".txt"));
         outf1txt << "obs\tepoch\tpostpred\n";
         unsigned obs1 = 0;
         for (unsigned epoch = 0; epoch < nepochs; epoch++) {
@@ -1350,12 +1526,27 @@ void savePostPredPlotsRFiles() {
         }
         outf1txt.close();
         
+        // Report GG calculations
+        double GG = ggP + ggk*ggG/(ggk + 1.0);
+        std::cerr << boost::format("GGp = %.5f\n") % ggP;
+        std::cerr << boost::format("GGg = %.5f\n") % ggG;
+        std::cerr << boost::format("k   = %.5f\n") % ggk;
+        std::cerr << boost::format("GG = GGp + (%g) GGg = %.5f\n") % (ggk/(ggk + 1.0)) % GG;
+        
+        std::string ggfilename = boost::str(boost::format("%s-ode-battle-%d-gg.txt") % output_file_prefix % battle_id);
+        std::ofstream ggf(ggfilename);
+        ggf << boost::format("GGp = %.5f\n") % ggP;
+        ggf << boost::format("GGg = %.5f\n") % ggG;
+        ggf << boost::format("k   = %.5f\n") % ggk;
+        ggf << boost::format("GG = GGp + (%g) GGg = %.5f\n") % (ggk/(ggk + 1.0)) % GG;
+        ggf.close();
+        
 #if defined(TAYLOR_KARLIN_CHECK)
         //####################### group tmp ######################
         // Open file for group tmp
         colony_name = battles[battle_id].second;
-        std::string fnprefix1tmp = boost::str(boost::format("%s-battle-%d-%s-expected.") % output_file_prefix % battle_id % colony_name);
-        std::ofstream outf1tmp(fnprefix1tmp + std::string("R"));
+        std::string fnprefix1tmp = boost::str(boost::format("%s-battle-%d-%s-expected") % output_file_prefix % battle_id % colony_name);
+        std::ofstream outf1tmp(fnprefix1tmp + std::string(".R"));
 
         nominal_sample_size = 0;
         actual_sample_size = 0;
@@ -1365,7 +1556,7 @@ void savePostPredPlotsRFiles() {
         outf1tmp << "\n";
         outf1tmp << "library(ggplot2)\n";
         outf1tmp << "\n";
-        outf1tmp << boost::format("pdf(\"%s\")\n") % (fnprefix1tmp + std::string("pdf"));
+        outf1tmp << boost::format("pdf(\"%s\")\n") % (fnprefix1tmp + std::string(".pdf"));
         outf1tmp << "\n";
         outf1tmp << "f <- c()\n";
         outf1tmp << "d1tmp <- c()\n";
@@ -1392,7 +1583,7 @@ void savePostPredPlotsRFiles() {
         outf1tmp << boost::format("   colony = rep(\"%s\", %d)\n") % colony_name % actual_sample_size;
         outf1tmp << ")\n";
         outf1tmp << "\n";
-        outf1tmp << "line_data_1tmp <- data.frame(\n";
+        outf1tmp << "y_data_1tmp <- data.frame(\n";
         outf1tmp << boost::format("   obs = rep(\"%s\", %d),\n") % colony_name % nepochs;
         outf1tmp << boost::format("   x = seq(1,%d,1),\n") % nepochs;
         outf1tmp << boost::format("   y = c(%s)\n") % boost::algorithm::join(y1vect,",");
@@ -1400,8 +1591,8 @@ void savePostPredPlotsRFiles() {
         outf1tmp << "\n";
         outf1tmp << "p <- ggplot()\n";
         outf1tmp << "p <- p + geom_violin(data=violin_data_1tmp, fill=\"brown\", aes(x=name, y=value))\n";
-        outf1tmp << "p <- p + geom_line(data=line_data_1tmp, color=\"orange\", aes(x=x, y=y))\n";
-        outf1tmp << "p <- p + geom_point(data=line_data_1tmp, color=\"orange\", aes(x=x, y=y))\n";
+        outf1tmp << "p <- p + geom_line(data=y_data_1tmp, color=\"orange\", aes(x=x, y=y))\n";
+        outf1tmp << "p <- p + geom_point(data=y_data_1tmp, color=\"orange\", aes(x=x, y=y))\n";
         outf1tmp << "p <- p + labs(title=sprintf(\"Battle %d (%s, start=%d, ODE model, expected deaths, %%dropped = %.1f)\",\n";
         outf1tmp << boost::format("    %d,\n") % battle_id;
         outf1tmp << boost::format("    \"%s\",\n") % colony_name;
@@ -1416,7 +1607,7 @@ void savePostPredPlotsRFiles() {
         outf1tmp.close();
         
         // Open text file to store data for viewing in programs other than R
-        std::ofstream outf1tmptxt(fnprefix1tmp + std::string("txt"));
+        std::ofstream outf1tmptxt(fnprefix1tmp + std::string(".txt"));
         outf1tmptxt << "obs\tepoch\tmean\tvariance\n";
         unsigned obs1tmp = 0;
         for (unsigned epoch = 0; epoch < nepochs; epoch++) {
