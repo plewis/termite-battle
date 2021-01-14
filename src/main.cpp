@@ -58,8 +58,8 @@
 #include "tbtypes.hpp"
 
 std::string     program_name          = "termitebattle";
-unsigned        major_version         = 1;
-unsigned        minor_version         = 9;
+unsigned        major_version         = 2;
+unsigned        minor_version         = 1;
 
 #if defined(USE_REGRESSION_MODEL)
 std::string     model_name            = "Binomial Regression Model";
@@ -91,10 +91,12 @@ std::string     model_name            = "ODE Model";
 //    - these plots are directly comparable to the plots produced by the RSTAN files
 //      for the regression model
 //    - removed unnecessary boost::str wrapper from around boost::format() whereever possible
-// v1.9 (26-Dec-2020)
+// v2.0 (26-Dec-2020)
 //    - added Gelfand-Ghosh (1998) posterior predictive (squared-error loss) model selection to both regression and ODE model
 //    - modified stan code (removed binomial coefficients) so that marginal likelihoods in the regression
 //      models would be comparable to those in the Eldridge model
+// v2.1 (14-Jan-2021)
+//    - cumulative GG statistics now output after all battles have been processed, not after each battle, which was confusing
 
 // Output-related
 bool do_save_output = true;
@@ -792,9 +794,9 @@ void saveRSTAN() {
     std::vector<std::string> Kvect, y0vect, y1vect, n0start, n1start, n0vect, n1vect, battleids, filenames, colony0, colony1;
     for (auto b = which_battles.begin(); b != which_battles.end(); b++) {
         if (stan == "equal")
-            filenames.push_back(boost::str(boost::format("\"%s-equal-battle-%s\"") % output_file_prefix % std::to_string(*b)));
+            filenames.push_back(boost::str(boost::format("\"%s-reg-equal-battle-%s-\"") % output_file_prefix % std::to_string(*b)));
         else
-            filenames.push_back(boost::str(boost::format("\"%s-full-battle-%s\"") % output_file_prefix % std::to_string(*b)));
+            filenames.push_back(boost::str(boost::format("\"%s-reg-full-battle-%s-\"") % output_file_prefix % std::to_string(*b)));
         battleids.push_back(std::to_string(*b));
         colony0.push_back(boost::str(boost::format("\"%s\"") % battles[*b].first));
         colony1.push_back(boost::str(boost::format("\"%s\"") % battles[*b].second));
@@ -933,12 +935,12 @@ void saveRSTAN() {
     rstanf << "    ### Create plot for battle j, group 0 ###\n";
     rstanf << "    #########################################\n";
     rstanf << "    if (postpred) {\n";
-    rstanf << "        fn <- paste(fnprefix[j], \"-reg-\", colony0[j], \"-postpred.pdf\", sep=\"\")\n";
+    rstanf << "        fn <- paste(fnprefix[j], colony0[j], \"-postpred.pdf\", sep=\"\")\n";
     rstanf << "        print(sprintf(\"Creating file %s...\", fn))\n";
     rstanf << "        pdf(fn)\n";
     rstanf << "    }\n";
     rstanf << "    else {\n";
-    rstanf << "        fn <- paste(fnprefix[j], \"-reg-\", colony0[j], \"-residuals.pdf\", sep=\"\")\n";
+    rstanf << "        fn <- paste(fnprefix[j], colony0[j], \"-residuals.pdf\", sep=\"\")\n";
     rstanf << "        print(sprintf(\"Creating file %s...\", fn))\n";
     rstanf << "        pdf(fn)\n";
     rstanf << "    }\n";
@@ -1043,12 +1045,12 @@ void saveRSTAN() {
     rstanf << "    ### Create plot for battle j, group 1 ###\n";
     rstanf << "    #########################################\n";
     rstanf << "    if (postpred) {\n";
-    rstanf << "        fn <- paste(fnprefix[j], \"-reg-\", colony1[j], \"-postpred.pdf\", sep=\"\")\n";
+    rstanf << "        fn <- paste(fnprefix[j], colony1[j], \"-postpred.pdf\", sep=\"\")\n";
     rstanf << "        print(sprintf(\"Creating file %s...\", fn))\n";
     rstanf << "        pdf(fn)\n";
     rstanf << "    }\n";
     rstanf << "    else {\n";
-    rstanf << "        fn <- paste(fnprefix[j], \"-reg-\", colony1[j], \"-residuals.pdf\", sep=\"\")\n";
+    rstanf << "        fn <- paste(fnprefix[j], colony1[j], \"-residuals.pdf\", sep=\"\")\n";
     rstanf << "        print(sprintf(\"Creating file %s...\", fn))\n";
     rstanf << "        pdf(fn)\n";
     rstanf << "    }\n";
@@ -1155,10 +1157,20 @@ void saveRSTAN() {
     rstanf << "    first_epoch <- last_epoch + 1\n";
     rstanf << "}\n";
     rstanf << "\n";
+        
+    // Save Gelfand-Ghosh stats to the R console
     rstanf << "print(sprintf(\"GGp = %.5f\", ggP))\n";
     rstanf << "print(sprintf(\"GGg = %.5f\", ggG))\n";
-    //rstanf << "print(sprintf(\"GG = GGp + 2 GGg = %.5f\", ggP + 2*ggG))\n";
-    rstanf << "print(sprintf(\"GG = GGp + (%g) GGg = %.5f\", ggk/(ggk+1), ggP + ggk*ggG/(ggk + 1)))\n";
+    rstanf << "print(sprintf(\"k   = %.5f\", ggk))\n";
+    rstanf << "print(sprintf(\"GG  = %.5f\", ggP + ggk*ggG/(ggk + 1)))\n";
+
+    // Save Gelfand-Ghosh stats to a file
+    std::string ggfilename;
+    if (stan == "equal")
+        ggfilename = boost::str(boost::format("%s-reg-equal-gg.txt") % output_file_prefix);
+    else
+        ggfilename = boost::str(boost::format("%s-reg-full-gg.txt") % output_file_prefix);
+    rstanf << "writeLines(c(sprintf(\"GGp = %.5f\", ggP),sprintf(\"GGg = %.5f\", ggG),sprintf(\"k   = %.5f\", ggk),sprintf(\"GG  = %.5f\", ggP + ggk*ggG/(ggk + 1))), \"" << ggfilename << "\")\n";
 
     rstanf.close();
     consoleOutput(boost::format("RSTAN file \"%s\" saved.\n") % output_file_name);
@@ -1258,6 +1270,11 @@ void savePostPredPlotsRFiles() {
     shellf << "DIR=\"$(pwd)\"\n";
     shellf << "cd $DIR\n";
 
+    //####################### GG ######################
+    double ggP = 0.0;
+    double ggG = 0.0;
+    double ggk = 1.0;
+    
     // Loop across all battles, creating separate plot files for group0 and group1 for each battle
     unsigned battle_index = 0;
     for (auto battle = which_battles.begin(); battle != which_battles.end(); battle++) {
@@ -1284,12 +1301,7 @@ void savePostPredPlotsRFiles() {
             mprev = m;
             nprev = n;
         }
-        
-        //####################### GG ######################
-        double ggP = 0.0;
-        double ggG = 0.0;
-        double ggk = 1.0;
-        
+                
         //####################### group 0 ######################
         // Open file for group 0
         std::string colony_name = battles[battle_id].first;
@@ -1354,8 +1366,8 @@ void savePostPredPlotsRFiles() {
             //ggG += 2.0*n0[epoch]*((ggG1 - ggG2)/(ggk + 1.0) - ggG3);
             ggG += (ggmu - y0[epoch])*(ggmu - y0[epoch]);
 
-            std::cerr << boost::format("\n~~> group 0, epoch %d: mu = %.5f, y = %.5f, a = %.5f\n")
-                % epoch % ggmu % y0[epoch] % gga;
+            //std::cerr << boost::format("\n~~> group 0, epoch %d: mu = %.5f, y = %.5f, a = %.5f\n")
+            //    % epoch % ggmu % y0[epoch] % gga;
         }
         outf0 << "\n";
         
@@ -1472,8 +1484,8 @@ void savePostPredPlotsRFiles() {
             //ggG += 2.0*n1[epoch]*( (ggG1 - ggG2)/(ggk + 1.0) - ggG3);
             ggG += (ggmu - y1[epoch])*(ggmu - y1[epoch]);
 
-            std::cerr << boost::format("\n~~> group 1, epoch %d: mu = %.5f, y = %.5f, a = %.5f\n")
-                % epoch % ggmu % y1[epoch] % gga;
+            //std::cerr << boost::format("\n~~> group 1, epoch %d: mu = %.5f, y = %.5f, a = %.5f\n")
+            //    % epoch % ggmu % y1[epoch] % gga;
         }
         outf1 << "\n";
         
@@ -1525,22 +1537,7 @@ void savePostPredPlotsRFiles() {
             }
         }
         outf1txt.close();
-        
-        // Report GG calculations
-        double GG = ggP + ggk*ggG/(ggk + 1.0);
-        std::cerr << boost::format("GGp = %.5f\n") % ggP;
-        std::cerr << boost::format("GGg = %.5f\n") % ggG;
-        std::cerr << boost::format("k   = %.5f\n") % ggk;
-        std::cerr << boost::format("GG = GGp + (%g) GGg = %.5f\n") % (ggk/(ggk + 1.0)) % GG;
-        
-        std::string ggfilename = boost::str(boost::format("%s-ode-battle-%d-gg.txt") % output_file_prefix % battle_id);
-        std::ofstream ggf(ggfilename);
-        ggf << boost::format("GGp = %.5f\n") % ggP;
-        ggf << boost::format("GGg = %.5f\n") % ggG;
-        ggf << boost::format("k   = %.5f\n") % ggk;
-        ggf << boost::format("GG = GGp + (%g) GGg = %.5f\n") % (ggk/(ggk + 1.0)) % GG;
-        ggf.close();
-        
+                
 #if defined(TAYLOR_KARLIN_CHECK)
         //####################### group tmp ######################
         // Open file for group tmp
@@ -1627,6 +1624,22 @@ void savePostPredPlotsRFiles() {
         
         battle_index++;
     }
+
+    // Report GG calculations
+    double GG = ggP + ggk*ggG/(ggk + 1.0);
+    std::cerr << boost::format("GGp = %.5f\n") % ggP;
+    std::cerr << boost::format("GGg = %.5f\n") % ggG;
+    std::cerr << boost::format("k   = %.5f\n") % ggk;
+    std::cerr << boost::format("GG  = %.5f\n") % GG;
+    
+    std::string ggfilename = boost::str(boost::format("%s-ode-gg.txt") % output_file_prefix);
+    std::ofstream ggf(ggfilename);
+    ggf << boost::format("GGp = %.5f\n") % ggP;
+    ggf << boost::format("GGg = %.5f\n") % ggG;
+    ggf << boost::format("k   = %.5f\n") % ggk;
+    ggf << boost::format("GG  = %.5f\n") % GG;
+    ggf.close();
+    
     shellf.close();
 }
 
