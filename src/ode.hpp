@@ -21,6 +21,9 @@
 //  SOFTWARE.
 #pragma once
 
+//
+//#define UNIFORM_THETA_PRIOR
+
 // Lambda-related
 double lambda = 1.0;
 double lambda_fixed = lambda;
@@ -33,12 +36,21 @@ double lambda_prior_sigma = 100.0;
 double lambda_prior_mean = exp(lambda_prior_mu + lambda_prior_sigma*lambda_prior_sigma/2);
 double log_lambda_prior_denom = log(lambda_prior_sigma) + 0.5*log(2.0*M_PI);
 
+#if defined(UNIFORM_THETA_PRIOR)
+// Theta transformed beta reference distribution
+double_vect_t sampled_lambda;
+double lambda_refdist_mu = 0.0;
+double lambda_refdist_sigma = 100.0;
+double lambda_refdist_mean = exp(lambda_refdist_mu + lambda_refdist_sigma*lambda_refdist_sigma/2);
+double log_lambda_refdist_denom = log(lambda_refdist_sigma) + 0.5*log(2.0*M_PI);
+#else
 // Theta Lognormal reference distribution
 double_vect_t sampled_lambda;
 double lambda_refdist_mu = 0.0;
 double lambda_refdist_sigma = 100.0;
 double lambda_refdist_mean = exp(lambda_refdist_mu + lambda_refdist_sigma*lambda_refdist_sigma/2);
 double log_lambda_refdist_denom = log(lambda_refdist_sigma) + 0.5*log(2.0*M_PI);
+#endif
 
 // Theta-related
 double initial_theta = 1.0;
@@ -156,11 +168,12 @@ void processCommandLineOptions(int argc, char * argv[]) {
     boost::program_options::variables_map vm;
     boost::program_options::options_description desc("Allowed options");
     desc.add_options()
-        ("help,h",                                                              "produce help message")
-        ("version,v",                                                           "show program version")
-        ("config",                                                              "create default battle.conf file")
-        ("show-battles",                                                        "show battles read in from file and quit")
+        ("help,h",                                                               "produce help message")
+        ("version,v",                                                            "show program version")
+        ("config",                                                               "create default battle.conf file")
+        ("show-battles",                                                         "show battles read in from file and quit")
         ("stan", boost::program_options::value(&stan),                           "save STAN files for performing binomial regression (should be none, equal, or full)")
+        ("binomcoeff", boost::program_options::value<bool>(&binomcoeff),         "include binomial coefficients in regression (yes or no)")
         ("plot", boost::program_options::value(&plot),                           "save R files for plotting expected deaths or posterior predictive distribution (should be none, expected, or postpred)")
         ("datafile,d",    boost::program_options::value(&data_file_name),        "name of the data file to read")
         ("outfile,o",     boost::program_options::value(&output_file_prefix),    "output file name prefix (a number and .txt will be added to this)")

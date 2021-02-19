@@ -59,7 +59,7 @@
 
 std::string     program_name          = "termitebattle";
 unsigned        major_version         = 2;
-unsigned        minor_version         = 1;
+unsigned        minor_version         = 2;
 
 #if defined(USE_REGRESSION_MODEL)
 std::string     model_name            = "Binomial Regression Model";
@@ -97,6 +97,8 @@ std::string     model_name            = "ODE Model";
 //      models would be comparable to those in the Eldridge model
 // v2.1 (14-Jan-2021)
 //    - cumulative GG statistics now output after all battles have been processed, not after each battle, which was confusing
+// v2.2 (19-Feb-2021)
+//    - added option to keep or remove binomial coefficients in STAN code for regression model
 
 // Output-related
 bool do_save_output = true;
@@ -147,6 +149,7 @@ found_map_t     battle_found;
 
 // STAN options
 std::string     stan                  = "none"; // none, equal (beta0=beta1,beta3), full (beta0,beta1,beta3)
+bool            binomcoeff            = true;   // yes (include binomial coefficients in STAN files) or no (do not include them)
 
 // Steppingstone marginal likelihood estimation
 bool            refdist_provided      = false;
@@ -1233,9 +1236,11 @@ void saveSTAN() {
         stanf << "            target += binomial_logit_lpmf(y1[i] | n1prev, beta1 + beta3 * phi);\n";
     }
     stanf << "\n";
-    stanf << "            // remove binomial coefficients to make marginal likelihood comparable to the Eldridge model\n";
-    stanf << "            target += lgamma(y0[i] + 1.0) + lgamma(n0prev - y0[i] + 1.0) - lgamma(n0prev + 1);\n";
-    stanf << "            target += lgamma(y1[i] + 1.0) + lgamma(n1prev - y1[i] + 1.0) - lgamma(n1prev + 1);\n";
+    if (!binomcoeff) {
+        stanf << "            // remove binomial coefficients to make marginal likelihood comparable to the Eldridge model\n";
+        stanf << "            target += lgamma(y0[i] + 1.0) + lgamma(n0prev - y0[i] + 1.0) - lgamma(n0prev + 1);\n";
+        stanf << "            target += lgamma(y1[i] + 1.0) + lgamma(n1prev - y1[i] + 1.0) - lgamma(n1prev + 1);\n";
+    }
     stanf << "\n";
     stanf << "            y0prev = y0[i];\n";
     stanf << "            y1prev = y1[i];\n";
