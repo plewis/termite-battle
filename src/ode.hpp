@@ -21,8 +21,12 @@
 //  SOFTWARE.
 #pragma once
 
-//
-//#define UNIFORM_THETA_PRIOR
+// If true, and if alpha, R, theta, and lambda are all fixed, tests MCMC machinery by
+// assuming each group has its own death rate that is not influenced by the other group.
+// Note that group 1 death rate is R*alpha while group 2 death rate is just alpha
+// (counterintuitive because alpha no longer measures fighting ability but instead measures death rate.
+bool linear_pure_death_model = false;  // true:  use independent linear pure death model for each army
+                                       // false: use Eldridge Adam's ODE model
 
 // Lambda-related
 double lambda = 1.0;
@@ -36,21 +40,12 @@ double lambda_prior_sigma = 100.0;
 double lambda_prior_mean = exp(lambda_prior_mu + lambda_prior_sigma*lambda_prior_sigma/2);
 double log_lambda_prior_denom = log(lambda_prior_sigma) + 0.5*log(2.0*M_PI);
 
-#if defined(UNIFORM_THETA_PRIOR)
-// Theta transformed beta reference distribution
-double_vect_t sampled_lambda;
-double lambda_refdist_mu = 0.0;
-double lambda_refdist_sigma = 100.0;
-double lambda_refdist_mean = exp(lambda_refdist_mu + lambda_refdist_sigma*lambda_refdist_sigma/2);
-double log_lambda_refdist_denom = log(lambda_refdist_sigma) + 0.5*log(2.0*M_PI);
-#else
 // Theta Lognormal reference distribution
 double_vect_t sampled_lambda;
 double lambda_refdist_mu = 0.0;
 double lambda_refdist_sigma = 100.0;
 double lambda_refdist_mean = exp(lambda_refdist_mu + lambda_refdist_sigma*lambda_refdist_sigma/2);
 double log_lambda_refdist_denom = log(lambda_refdist_sigma) + 0.5*log(2.0*M_PI);
-#endif
 
 // Theta-related
 double initial_theta = 1.0;
@@ -144,24 +139,46 @@ unsigned R_attempts = 0;
 // #############################################################################
 
 void createDefaultConfigurationFile() {
-    std::ofstream conf("battle.conf");
-    conf << "datafile    = battle.txt  # name of the data file to read" << std::endl;
-    conf << "outfile     = output      # name of the output file" << std::endl;
-    conf << "replace     = " << (replace_outfile ? "yes" : "no ") << "         # yes means OK to replace existing output file" << std::endl;
-    conf << "#battle     = 135         # id of the battle to process" << std::endl;
-    conf << "saveevery   = " << save_every   << "          # determines how often to save parameters to output file" << std::endl;
-    conf << "burninevery = " << burnin_every << "        # determines how often to report progress during burn-in phase" << std::endl;
-    conf << "reportevery = " << report_every << "        # determines how often to report progress during sampling phase" << std::endl;
-    conf << "nsamples    = " << num_samples  << "        # number of samples to save to parameters file" << std::endl;
-    conf << "nburnin     = " << num_burnin_iterations << "        # number of burn-in iterations to perform" << std::endl;
-    conf << "nstones      = 0          # number of steppingstones to use in estimating marginal likelihood" << std::endl;
-    conf << "fixlambda    = 1.0        # fix lambda at this value" << std::endl;
-    conf << "#fixtheta    = 1.0        # fix theta at this value" << std::endl;
-    conf << "#fixalpha    = 1.0        # fix alpha at this value" << std::endl;
-    conf << "#fixR        = 1.0        # fix R at this value" << std::endl;
-    conf << "#seed        = 12345      # pseudorandom number seed" << std::endl;
+    std::ofstream conf("default-battle.conf");
+    conf << "# Note: you must rename this file battle.conf in order for it to be recognized by the program.\n";
+    conf << "datafile    = battle.dat  # name of the data file to read\n";
+    conf << "outfile     = CD1040      # output file name prefix (a number and .txt will be added to this)\n";
+    conf << "replace     = no          # OK to replace output file if it already exists? (yes or no)\n";
+    conf << "battle      = 51          # ID of a battle to process (may be used multiple times)\n";
+    conf << "battle      = 53          # ID of a battle to process (may be used multiple times)\n";
+    conf << "battle      = 55          # ID of a battle to process (may be used multiple times)\n";
+    conf << "saveevery   = 10          # determines how often to save parameters to output file\n";
+    conf << "burninevery = 1000        # determines how often to report progress during burn-in phase\n";
+    conf << "reportevery = 1000        # determines how often to report progress during sampling phase\n";
+    conf << "nsamples    = 10000       # number of samples to save to parameters file\n";
+    conf << "nburnin     = 1000        # number of burn-in iterations to perform\n";
+    conf << "fixlambda    = 1.0        # fix lambda at this value\n";
+    conf << "#fixtheta    = 1.0        # fix theta at this value\n";
+    conf << "#fixalpha    = 1.0        # fix alpha at this value\n";
+    conf << "#fixR        = 1.0        # fix R at this value\n";
+    conf << "#seed        = 12345      # pseudorandom number seed\n";
+    conf << "nstones      = 0          # number of steppingstones to use in estimating marginal likelihood\n";
+    conf << "stan         = none       # save STAN files for performing binomial regression (should be none, equal, or full)\n";
+    conf << "pure-death   = no         # use independent linear pure-death model for each army (yes or no)\n";
+    conf << "plot         = no         # save R files for plotting expected deaths or posterior predictive distribution (should be none, expected, or postpred)\n";
+    conf << std::endl;
+    conf << "# The settings below serve to parameterize the reference distribution used for the generalized\n";
+    conf << "# steppingstone method (Fan et al. 2011. Molecular Biology and Evolution 28:523-532). You do not\n";
+    conf << "# need to specify these values - they are calculated automatically; however, if they are provided,\n";
+    conf << "# the values will be used and will save the need to perform an MCMC analysis of the posterior.\n";
+    conf << "# These values are stored in the file named refdist.conf whenever an MCMC analysis of the posterior\n";
+    conf << "# distribution is conducted; however, they will not be used unless copied into the battle.conf file.\n";
+    conf << "#lambdarefmu    = 0.123456     # mu parameter of Lognormal reference distribution for lambda\n";
+    conf << "#lambdarefsigma = 0.234567     # sigma parameter of Lognormal reference distribution for lambda\n";
+    conf << "#thetarefmu     = 0.34925514   # mu parameter of Lognormal reference distribution for theta\n";
+    conf << "#thetarefsigma  = 0.24060623   # sigma parameter of Lognormal reference distribution for theta\n";
+    conf << "#alpharefmu     = -5.24171388  # mu parameter of Lognormal reference distribution for alpha\n";
+    conf << "#alpharefsigma  = 0.51317800   # sigma parameter of Lognormal reference distribution for alpha\n";
+    conf << "#Rrefmu         = -3.00967373  # mu parameter of Lognormal reference distribution for R\n";
+    conf << "#Rrefsigma      =  1.43047406  # sigma parameter of Lognormal reference distribution for R\n";
     conf.close();
-    consoleOutput("Created file \"battle.conf\" containing default configuration.\n");
+    
+    consoleOutput("Created file \"default-battle.conf\" containing default configuration.\n");
 }
 
 void processCommandLineOptions(int argc, char * argv[]) {
@@ -170,11 +187,8 @@ void processCommandLineOptions(int argc, char * argv[]) {
     desc.add_options()
         ("help,h",                                                               "produce help message")
         ("version,v",                                                            "show program version")
-        ("config",                                                               "create default battle.conf file")
+        ("config",                                                               "create default-battle.conf file (warning: will overwrite if file exists)")
         ("show-battles",                                                         "show battles read in from file and quit")
-        ("stan", boost::program_options::value(&stan),                           "save STAN files for performing binomial regression (should be none, equal, or full)")
-        ("binomcoeff", boost::program_options::value<bool>(&binomcoeff),         "include binomial coefficients in regression (yes or no)")
-        ("plot", boost::program_options::value(&plot),                           "save R files for plotting expected deaths or posterior predictive distribution (should be none, expected, or postpred)")
         ("datafile,d",    boost::program_options::value(&data_file_name),        "name of the data file to read")
         ("outfile,o",     boost::program_options::value(&output_file_prefix),    "output file name prefix (a number and .txt will be added to this)")
         ("replace",       boost::program_options::value<bool>(&replace_outfile), "OK to replace output file if it already exists? yes/no")
@@ -198,6 +212,10 @@ void processCommandLineOptions(int argc, char * argv[]) {
         ("Rrefmu",        boost::program_options::value(&R_refdist_mu),          "mu parameter of Lognormal reference distribution for R")
         ("Rrefsigma",     boost::program_options::value(&R_refdist_sigma),       "sigma parameter of Lognormal reference distribution for R")
         ("seed",          boost::program_options::value(&random_number_seed),    "pseudorandom number seed")
+        ("stan", boost::program_options::value(&stan),                           "save STAN files for performing binomial regression (should be none, equal, or full)")
+        //("binomcoeff", boost::program_options::value<bool>(&binomcoeff),         "include binomial coefficients in regression (yes or no)")
+        ("pure-death", boost::program_options::value<bool>(&linear_pure_death_model), "use independent linear pure-death model for each army (yes or no)")
+        ("plot", boost::program_options::value(&plot),                           "save R files for plotting expected deaths or posterior predictive distribution (should be none, expected, or postpred)")
     ;
     boost::program_options::store(boost::program_options::parse_command_line(argc, argv, desc), vm);
     try {
@@ -205,10 +223,30 @@ void processCommandLineOptions(int argc, char * argv[]) {
         boost::program_options::store(parsed, vm);
     }
     catch(boost::program_options::reading_file & x) {
-        consoleOutput("Note: configuration file (battle.conf) not found");
+        consoleOutput("Note: configuration file (battle.conf) not found\n\n");
     }
     boost::program_options::notify(vm);
 
+    if (linear_pure_death_model) {
+        consoleOutput("Linear pure-death model being used\n");
+        consoleOutput("  R*alpha is group 1 death rate\n");
+        consoleOutput("    alpha is group 2 death rate\n");
+        if (vm.count("fixtheta") == 0 || vm.count("fixlambda") == 0) {
+            consoleOutput("Error: must fix both theta and lambda to 1.0 if linear pure-death model used.\n");
+            std::exit(1);
+        }
+        else {
+            if (vm.count("fixtheta") > 0 && theta_fixed != 1.0) {
+                consoleOutput(boost::format("theta must be fixed to 1.0 if linear pure-death model used (you specified %.5f).\n") % theta_fixed);
+                std::exit(1);
+            }
+            if (vm.count("fixlambda") > 0 && lambda_fixed != 1.0) {
+                consoleOutput(boost::format("lambda must be fixed to 1.0 if linear pure-death model used (you specified %.5f).\n") % lambda_fixed);
+                std::exit(1);
+            }
+        }
+    }
+    
     // If user specified --help on command line, output usage summary and quit
     if (vm.count("help") > 0) {
         std::ostringstream ss;
@@ -225,12 +263,12 @@ void processCommandLineOptions(int argc, char * argv[]) {
     
     // If user specified --conf on command line, create default conf file
     if (vm.count("config") > 0) {
-        if (boost::filesystem::exists("battle.conf")) {
-            consoleOutput("The file \"battle.conf\" already exists; please delete/remame it and try again.\n");
-        }
-        else {
+        //if (boost::filesystem::exists("battle.conf")) {
+        //    consoleOutput("The file \"battle.conf\" already exists; please delete/remame it and try again.\n");
+        //}
+        //else {
             createDefaultConfigurationFile();
-        }
+        //}
         std::exit(1);
     }
     
@@ -284,28 +322,40 @@ void processCommandLineOptions(int argc, char * argv[]) {
     
     if (vm.count("fixlambda") > 0) {
         // User specified --fixlambda on the command line
-        assert(lambda_fixed > 0.0);
+        if (lambda_fixed <= 0.0) {
+            consoleOutput(boost::format("if lambda is fixed then the value must be greater than 0.0 (you specified %.5f).\n") % lambda_fixed);
+            std::exit(1);
+        }
         lambda = lambda_fixed;
         fix_lambda = true;
     }
     
     if (vm.count("fixtheta") > 0) {
         // User specified --fixtheta on the command line
-        assert(theta_fixed > 0.0);
+        if (theta_fixed <= 0.0) {
+            consoleOutput(boost::format("if theta is fixed then the value must be greater than 0.0 (you specified %.5f).\n") % theta_fixed);
+            std::exit(1);
+        }
         theta = theta_fixed;
         fix_theta = true;
     }
     
     if (vm.count("fixalpha") > 0) {
         // User specified --fixalpha on the command line
-        assert(alpha_fixed > 0.0);
+        if (alpha_fixed <= 0.0) {
+            consoleOutput(boost::format("if alpha is fixed then the value must be greater than 0.0 (you specified %.5f).\n") % alpha_fixed);
+            std::exit(1);
+        }
         alpha = alpha_fixed;
         fix_alpha = true;
     }
     
     if (vm.count("fixR") > 0) {
         // User specified --fixR on the command line
-        assert(R_fixed > 0.0);
+        if (R_fixed <= 0.0) {
+            consoleOutput(boost::format("if R is fixed then the value must be greater than 0.0 (you specified %.5f).\n") % R_fixed);
+            std::exit(1);
+        }
         R = R_fixed;
         fix_R = true;
     }
@@ -337,6 +387,12 @@ void processCommandLineOptions(int argc, char * argv[]) {
             log_R_refdist_denom = log(R_refdist_sigma) + 0.5*log(2.0*M_PI);
         }
         
+        refdist_provided = true;
+    }
+    
+    if (vm.count("fixR") > 0 && vm.count("fixtheta") > 0 && vm.count("fixalpha") > 0 && vm.count("fixlambda") > 0) {
+        // Nothing to estimate in this case because everything is fixed except for
+        // latent variables representing death times
         refdist_provided = true;
     }
         
@@ -470,6 +526,55 @@ double estimateAlpha(battleid_t battle_id, unsigned k) {
 }
 
 // #############################################################################
+// ####### expected marginal likelihood for linear pure-death model ############
+// #############################################################################
+
+double calcLPDExpectedLogMarginalLikelihoodForEpoch(battleid_t battle_id, unsigned k) {
+    epoch_vect_t     & battle_epochs = epochs[battle_id];
+    tick_vect_vect_t & battle_ticks0 = ticks0[battle_id];
+    tick_vect_vect_t & battle_ticks1 = ticks1[battle_id];
+    double             t0            = std::get<0>(battle_epochs[k]);
+    double             t1            = std::get<0>(battle_epochs[k+1]);
+    double             T             = t1 - t0;
+    unsigned           n1            = std::get<1>(battle_epochs[k]);
+    unsigned           n2            = std::get<2>(battle_epochs[k]);
+    unsigned           y1            = (unsigned)battle_ticks0[k].size() - 2;
+    unsigned           y2            = (unsigned)battle_ticks1[k].size() - 2;
+    double logpy = 0.0;
+    
+    // group 1
+    logpy += boost::math::lgamma(n1 + 1);
+    logpy -= boost::math::lgamma(y1 + 1);
+    logpy -= boost::math::lgamma(n1 - y1 + 1);
+    logpy += y1*log(1.0 - exp(-R*alpha*T));
+    logpy += (n1 - y1)*(-R*alpha*T);
+        
+    // group 2
+    logpy += boost::math::lgamma(n2 + 1);
+    logpy -= boost::math::lgamma(y2 + 1);
+    logpy -= boost::math::lgamma(n2 - y2 + 1);
+    logpy += y2*log(1.0 - exp(-alpha*T));
+    logpy += (n2 - y2)*(-alpha*T);
+    
+    return logpy;
+}
+
+double calcLPDExpectedLogMarginalLikelihood() {
+    double lnL = 0.0;
+        
+    for (auto b = which_battles.begin(); b != which_battles.end(); b++) {
+        battleid_t battle_id = *b;
+        for (unsigned k = 0; k < nepochs[battle_id]; k++) {
+            double lnLk = calcLPDExpectedLogMarginalLikelihoodForEpoch(battle_id, k);
+            assert(lnLk == lnLk);
+            assert(!isnan(lnLk));
+            lnL += lnLk;
+        }
+    }
+    return lnL;
+}
+
+// #############################################################################
 // ############################### LIKELIHOOD ##################################
 // #############################################################################
 
@@ -486,7 +591,9 @@ double calcLogLikelihoodForEpoch(battleid_t battle_id, unsigned k) {
     datum_vect_t data;
     double t0 = std::get<0>(battle_epochs[k]);   // starting time for epoch k
     double t1 = std::get<0>(battle_epochs[k+1]); // ending time for epoch k
+    double T = t1 - t0;
     double t  = t0;
+    double tprev = t;
     
     double dt = 0.0;
     
@@ -494,36 +601,52 @@ double calcLogLikelihoodForEpoch(battleid_t battle_id, unsigned k) {
     unsigned n  = std::get<2>(battle_epochs[k]);  // starting n for epoch k
     unsigned g  = 0;
     
-    // Skip last element too, which also does not represent a death
     unsigned nticks0 = (unsigned)battle_ticks0[k].size();
     unsigned nticks1 = (unsigned)battle_ticks1[k].size();
+    
+    double log_sojourn0 = 0.0;
+    double log_sojourn1 = 0.0;
+
+    // Skip last element too, which also does not represent a death
     while (k0 < nticks0 - 1 || k1 < nticks1 - 1) {
         if (k0 == nticks0 - 1) {
             // death must have been in group 1
             g = 1;
-            t = battle_ticks1[k][k1].tcurr;
+            t     = battle_ticks1[k][k1].tcurr;
+            tprev = battle_ticks1[k][k1].tprev;
             assert(n == battle_ticks1[k][k1].nalive);
+            assert(t > tprev);
+            log_sojourn1 += log(t - tprev);
             k1++;
         }
         else if (k1 == nticks1 - 1) {
             // death must have been in group 0
             g = 0;
-            t = battle_ticks0[k][k0].tcurr;
+            t     = battle_ticks0[k][k0].tcurr;
+            tprev = battle_ticks0[k][k0].tprev;
             assert(m == battle_ticks0[k][k0].nalive);
+            assert(t > tprev);
+            log_sojourn0 += log(t - tprev);
             k0++;
         }
         else if (battle_ticks0[k][k0].tcurr < battle_ticks1[k][k1].tcurr) {
             // next death is in group 0
             g = 0;
-            t = battle_ticks0[k][k0].tcurr;
+            t     = battle_ticks0[k][k0].tcurr;
+            tprev = battle_ticks0[k][k0].tprev;
             assert(m == battle_ticks0[k][k0].nalive);
+            assert(t > tprev);
+            log_sojourn0 += log(t - tprev);
             k0++;
         }
         else {
             // next death is in group 1
             g = 1;
-            t = battle_ticks1[k][k1].tcurr;
+            t     = battle_ticks1[k][k1].tcurr;
+            tprev = battle_ticks1[k][k1].tprev;
             assert(n == battle_ticks1[k][k1].nalive);
+            assert(t > tprev);
+            log_sojourn1 += log(t - tprev);
             k1++;
         }
         dt = t - t0;
@@ -534,8 +657,12 @@ double calcLogLikelihoodForEpoch(battleid_t battle_id, unsigned k) {
         // dt is difference in time between this death and the previous death
         // m is current number of members in group 0 (before the death in group g)
         // n is current number of members in group 1 (before the death in group g)
-        double group0_death_rate = pow(alpha, 2.-lambda)*R*n*pow(m, 2.-theta);
-        double group1_death_rate = pow(alpha,2.-lambda)*pow(R,1.-lambda)*m*pow(n, 2-theta);
+        // alpha is the individual fighting ability of group 1
+        // R*alpha is the individual fighting ability of group 2
+        double mvalue = linear_pure_death_model ? 1.0 : m;
+        double nvalue = linear_pure_death_model ? 1.0 : n;
+        double group0_death_rate = pow(alpha, 2.-lambda)*R*nvalue*pow(m, 2.-theta);
+        double group1_death_rate = pow(alpha,2.-lambda)*pow(R,1.-lambda)*mvalue*pow(n, 2-theta);
         double total_rate = group0_death_rate + group1_death_rate;
         data.push_back(Datum(g, t, dt, m, n, m+n, group0_death_rate, group1_death_rate, total_rate));
 
@@ -547,8 +674,14 @@ double calcLogLikelihoodForEpoch(battleid_t battle_id, unsigned k) {
     }
     
     // Handle the time between the final death and the end
-    double group0_death_rate = pow(alpha, 2.-lambda)*R*n*pow(m, 2.-theta);
-    double group1_death_rate = pow(alpha,2.-lambda)*pow(R,1.-lambda)*m*pow(n, 2-theta);
+    assert(battle_ticks0[k][k0].tcurr > battle_ticks0[k][k0].tprev);
+    log_sojourn0 += log(battle_ticks0[k][k0].tcurr - battle_ticks0[k][k0].tprev);
+    assert(battle_ticks1[k][k1].tcurr > battle_ticks1[k][k1].tprev);
+    log_sojourn1 += log(battle_ticks1[k][k1].tcurr - battle_ticks1[k][k1].tprev);
+    double mvalue = linear_pure_death_model ? 1.0 : m;
+    double nvalue = linear_pure_death_model ? 1.0 : n;
+    double group0_death_rate = pow(alpha, 2.-lambda)*R*nvalue*pow(m, 2.-theta);
+    double group1_death_rate = pow(alpha,2.-lambda)*pow(R,1.-lambda)*mvalue*pow(n, 2-theta);
     double total_rate = group0_death_rate + group1_death_rate;
     data.push_back(Datum(-1, t, t1 - t0, m, n, m+n, group0_death_rate, group1_death_rate, total_rate));
                   
@@ -576,6 +709,17 @@ double calcLogLikelihoodForEpoch(battleid_t battle_id, unsigned k) {
     
     // Account for time from last death to end of battle
     logL -= data[data_length-1].mu*data[data_length-1].dt;
+
+    // Divide by joint prior on death times to turn joint probability density
+    // into likelihood (conditional density)
+    double z0 = 2.0*(nticks0 - 2) + 1.0;
+    double z1 = 2.0*(nticks1 - 2) + 1.0;
+    
+    // group 0
+    logL += log(T)*z0 - log_sojourn0 - boost::math::lgamma(z0 + 1.0);
+    
+    // group 1
+    logL += log(T)*z1 - log_sojourn1 - boost::math::lgamma(z1 + 1.0);
 
     return logL;
 }
@@ -667,7 +811,7 @@ void updatePositionGroup(battleid_t battle_id, unsigned g, unsigned k) {
     if (nticks == 2)
         return;
        
-    // Pick a tick to modify (not first and not last)
+    // Pick a tick to modify (not first and not last, as those are not parameters of the model)
     double u = lot.uniform();
     unsigned j = (unsigned)floor(1 + u*(nticks - 2));
 
@@ -692,7 +836,7 @@ void updatePositionGroup(battleid_t battle_id, unsigned g, unsigned k) {
                     
     double log_prior_ratio = log(tjprime - tjminus1) + log(tjplus1 - tjprime) - log(tj - tjminus1) - log(tjplus1-tj);
     double log_likelihood = calcLogLikelihood();
-    double log_kernel = ss_beta*(log_likelihood - log_likelihood0) + log_prior_ratio; // note: prior and reference distribution identical for sojourn times
+    double log_kernel = ss_beta*(log_likelihood - log_likelihood0) + log_prior_ratio; // note: prior and reference distribution identical for sojourn times, so ss_beta and 1 - ss_beta combine to equal 1
     u = lot.uniform();
     double logu = log(u);
     if (logu < log_kernel) {
@@ -1366,6 +1510,8 @@ void saveParameters(unsigned iteration) {
                 logP += calcLogPriorR(R);
                 logF += calcLogRefDistR(R);
             }
+            // Note: death times have identical prior and reference distributions, which
+            // is why we are not bothering to calculate logP and logF for these parameters
             double term = log_likelihood0 + logP - logF;
             ss_terms.push_back(term);
         }

@@ -59,7 +59,7 @@
 
 std::string     program_name          = "termitebattle";
 unsigned        major_version         = 2;
-unsigned        minor_version         = 2;
+unsigned        minor_version         = 3;
 
 #if defined(USE_REGRESSION_MODEL)
 std::string     model_name            = "Binomial Regression Model";
@@ -99,6 +99,16 @@ std::string     model_name            = "ODE Model";
 //    - cumulative GG statistics now output after all battles have been processed, not after each battle, which was confusing
 // v2.2 (19-Feb-2021)
 //    - added option to keep or remove binomial coefficients in STAN code for regression model
+// v2.3 (19-Mar-2021)
+//    - fixed bug in prior (order statistics prior on death times was not normalized, leading to
+//      incorrect marginal likelihoods)
+//    - fixed bug in likelihood (likelihood was, previously, the joint probability of deaths and death times;
+//      now the likelihood is, correctly, the probability of deaths conditional on death times)
+//    - added command line option --pure-death to use an independent linear pure-death model for each army,
+//      allowing for comparison of marginal likelihoods with analytical results, but also as a baseline
+//      for comparison (e.g. does the Eldridge model fit better than a model that just says each army is
+//      suffering casualties at a certain rate for some reason independent of the existance of the other army?)
+//    - removed --binomcoeff command line option because it is now clear that this should always be true
 
 // Output-related
 bool do_save_output = true;
@@ -652,6 +662,15 @@ void steppingstone() {
         logMarginalLikelihoood += logrk;
     }
     consoleOutput(boost::format("\nlog(marginal likelihood) = %.5f\n") % logMarginalLikelihoood);
+    
+    if (linear_pure_death_model) {
+        if (fix_R && fix_alpha) {
+            consoleOutput(boost::format("\nE[log(marginal likelihood)] = %.5f\n") % calcLPDExpectedLogMarginalLikelihood());
+        }
+        else {
+            consoleOutput("\nE[log(marginal likelihood)] is only calculated if both R and alpha are fixed.\n");
+        }
+    }
 }
 
 void checkBattlesFound() {
