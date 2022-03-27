@@ -59,7 +59,7 @@
 
 std::string     program_name          = "termitebattle";
 unsigned        major_version         = 2;
-unsigned        minor_version         = 3;
+unsigned        minor_version         = 4;
 
 #if defined(USE_REGRESSION_MODEL)
 std::string     model_name            = "Binomial Regression Model";
@@ -109,6 +109,10 @@ std::string     model_name            = "ODE Model";
 //      for comparison (e.g. does the Eldridge model fit better than a model that just says each army is
 //      suffering casualties at a certain rate for some reason independent of the existance of the other army?)
 //    - removed --binomcoeff command line option because it is now clear that this should always be true
+// v2.4 (10-Apr-2021)
+//    - added logP (log prior) and logF (log reference density) to output files so that restart is possible
+//    - added option ssrestart option so that user can restart at the stone index indicated
+//    - ssrestart useful in case program crashes after working on steppingstone for many hours!
 
 // Output-related
 bool do_save_output = true;
@@ -164,6 +168,7 @@ bool            binomcoeff            = true;   // yes (include binomial coeffic
 // Steppingstone marginal likelihood estimation
 bool            refdist_provided      = false;
 unsigned        nstones               = 0;
+unsigned        ss_restart            = 0;
 double          ss_alpha              = 0.3;
 double          ss_beta               = 1.0;
 double_vect_t   ss_beta_values;
@@ -558,7 +563,48 @@ void runMCMC() {
 double estimateLogRatioForStone(unsigned i) {
     double deltaBk = ss_beta_values[i+1] - ss_beta_values[i];
     //consoleOutput(boost::format("debug~~> deltaBk: %.5f\n") % deltaBk);
-            
+
+    if (i < ss_restart) {
+        // Need to read sampled log-likelihoods from file
+        std::string file_name = boost::str(boost::format("%s-%.5f.txt") % output_file_prefix % ss_beta);
+        std::ifstream t(file_name);
+        std::stringstream buffer;
+        buffer << t.rdbuf();
+        std::string file_contents = buffer.str();
+        
+        // Store lines from file in vector
+        std::vector<std::string> lines;
+        const std::regex rgx("[\\r\\n]+");
+        std::sregex_token_iterator iter(file_contents.begin(), file_contents.end(), rgx, -1);
+        for (std::sregex_token_iterator end; iter != end; ++iter) {
+            lines.push_back(iter->str());
+        }
+        
+        // Read values from "logL" column using regular expression
+        std::vector<std::string> parts;
+        for (auto line : lines) {
+            // Divide line into whitespace-delimited strings, which are stored in parts
+            parts.clear();
+            std::regex re("\\s+");
+            std::sregex_token_iterator i(line.begin(), line.end(), re, -1);
+            std::sregex_token_iterator j;
+            while(i != j) {
+                parts.push_back(*i++);
+            }
+            std::string logLstr = parts[1];
+            //std::string logPstr = parts[2];
+            //std::string logFstr = parts[3];
+            if (logLstr != "logL") {
+                double logL = std::atof(logLstr.c_str());
+                //double logP = std::atof(logPstr.c_str());
+                //double logF = std::atof(logFstr.c_str());
+                double logP = 0.0;
+                double logF = 0.0;
+                ss_terms.push_back(logL + logP - logF);
+            }
+        }
+    }
+    
     // Let logeta equal the maximum value in ss_terms vector
     auto maxit = std::max_element(ss_terms.begin(), ss_terms.end());
     assert(maxit != ss_terms.end());
@@ -616,8 +662,14 @@ void steppingstone() {
     consoleOutput(boost::format("  number of burn-in iterations: %d\n") % num_burnin_iterations);
     consoleOutput(boost::format("  number of post burn-in iterations: %d\n") % num_iterations);
     consoleOutput(boost::format("  number of samples to save: %d\n") % num_samples);
+    if (ss_restart > 0) {
+        consoleOutput(boost::format("  *** restarting at stone index: %d\n") % ss_restart);
+    }
     
     if (!refdist_provided) {
+        if (ss_restart > 0) {
+            throw XBadRestart();
+        }
         // Sample from the posterior in order to parameterize the reference distribution
         ss_beta = 1.0;
         initMCMC();
@@ -643,10 +695,12 @@ void steppingstone() {
     double_vect_t log_ratios;
     for (unsigned stone = 0; stone < nstones; stone++) {
         ss_beta = ss_beta_values[stone];
-        ss_terms.clear();
-        consoleOutput(boost::format("\n*** steppingstone | beta = %.5f ***\n") % ss_beta);
-        initMCMC();
-        runMCMC();
+        if (stone >= ss_restart) {
+            ss_terms.clear();
+            consoleOutput(boost::format("\n*** steppingstone | beta = %.5f ***\n") % ss_beta);
+            initMCMC();
+            runMCMC();
+        }
         double logrk = estimateLogRatioForStone(stone);
         consoleOutput(boost::format("\n  log(ratio) = %.5f\n") % logrk);
         consoleOutput(boost::format("\n  ss_terms.size() = %d\n") % ss_terms.size());
@@ -1706,6 +1760,10 @@ int main(int argc, char * argv[]) {
     }
     catch(XImpossibleBattle & x) {
         std::cerr << "ImpossibleBattle: number of combatants should not increase during battle" << std::endl;
+        std::cerr << "Aborted." << std::endl;
+    }
+    catch(XBadRestart & x) {
+        std::cerr << "BadRestart: ssrestart specified but no reference distribution found" << std::endl;
         std::cerr << "Aborted." << std::endl;
     }
     catch(std::exception & x) {

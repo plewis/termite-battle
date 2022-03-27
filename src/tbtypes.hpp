@@ -28,6 +28,9 @@ class XBadBattle : public std::exception {};
 // Exception thrown if the number of combatants goes up during the battle.
 class XImpossibleBattle : public std::exception {};
 
+// Exception thrown if attempting steppingstone restart with no reference distribution defined.
+class XBadRestart : public std::exception {};
+
 struct Tick {
     unsigned group;
     unsigned nalive;

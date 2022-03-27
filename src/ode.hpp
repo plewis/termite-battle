@@ -211,6 +211,7 @@ void processCommandLineOptions(int argc, char * argv[]) {
         ("alpharefsigma", boost::program_options::value(&alpha_refdist_sigma),   "sigma parameter of Lognormal reference distribution for alpha")
         ("Rrefmu",        boost::program_options::value(&R_refdist_mu),          "mu parameter of Lognormal reference distribution for R")
         ("Rrefsigma",     boost::program_options::value(&R_refdist_sigma),       "sigma parameter of Lognormal reference distribution for R")
+        ("ssrestart",     boost::program_options::value(&ss_restart),            "restart steppingstone at this stone index (0 <= ssrestart < nstones)")
         ("seed",          boost::program_options::value(&random_number_seed),    "pseudorandom number seed")
         ("stan", boost::program_options::value(&stan),                           "save STAN files for performing binomial regression (should be none, equal, or full)")
         //("binomcoeff", boost::program_options::value<bool>(&binomcoeff),         "include binomial coefficients in regression (yes or no)")
@@ -1483,7 +1484,7 @@ void samplePosteriorPredictiveDistribution(unsigned iteration) {
 void saveParameters(unsigned iteration) {
     if (do_save_output && iteration == 0) {
         // output the column headers to the output file
-        outf << boost::format("%d\t%s\t%s\t%s\t%s\t%s\n") % "iteration" % "logL" % "lambda" % "theta" % "alpha" % "R";
+        outf << boost::format("%d\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n") % "iteration" % "logL" % "logP" % "logF" % "lambda" % "theta" % "alpha" % "R";
     }
     
     if (!tuning && iteration > 0 && iteration % save_every == 0) {
@@ -1491,9 +1492,9 @@ void saveParameters(unsigned iteration) {
         sampled_theta.push_back(theta);
         sampled_alpha.push_back(alpha);
         sampled_R.push_back(R);
+        double logP = 0.0;
+        double logF = 0.0;
         if (ss_beta < 1.0) {
-            double logP = 0.0;
-            double logF = 0.0;
             if (!fix_lambda) {
                 logP += calcLogPriorLambda(lambda);
                 logF += calcLogRefDistLambda(lambda);
@@ -1516,7 +1517,7 @@ void saveParameters(unsigned iteration) {
             ss_terms.push_back(term);
         }
         if (do_save_output)
-            outf << boost::format("%d\t%.9f\t%.9f\t%.9f\t%.9f\t%.9f\n") % iteration % log_likelihood0 % lambda % theta % alpha % R;
+            outf << boost::format("%d\t%.9f\t%.9f\t%.9f\t%.9f\t%.9f\t%.9f\t%.9f\n") % iteration % log_likelihood0 % logP % logF % lambda % theta % alpha % R;
         if (do_postpred)
             samplePosteriorPredictiveDistribution(iteration);
     }
