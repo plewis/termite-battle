@@ -60,7 +60,7 @@
 
 std::string     program_name          = "termitebattle";
 unsigned        major_version         = 2;
-unsigned        minor_version         = 4;
+unsigned        minor_version         = 5;
 
 #if defined(USE_REGRESSION_MODEL)
 std::string     model_name            = "Binomial Regression Model";
