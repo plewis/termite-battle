@@ -20,6 +20,9 @@
 //  OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 //  SOFTWARE.
 #pragma once
+#include "conditionals.hpp"
+
+extern bool prior_only;
 
 // If true, and if alpha, R, theta, and lambda are all fixed, tests MCMC machinery by
 // assuming each group has its own death rate that is not influenced by the other group.
@@ -27,6 +30,14 @@
 // (counterintuitive because alpha no longer measures fighting ability but instead measures death rate.
 bool linear_pure_death_model = false;  // true:  use independent linear pure death model for each army
                                        // false: use Eldridge Adam's ODE model
+                                       
+#if defined(TALLY_DEATH_ORDER)
+// death_orderings stored, for each battle and epoch, a map relating a particular ordering of deaths
+// (key) to a count of the number of samples in which that ordering was in place. Each ordering
+// is stored as a string of * and . characters, where * indicates a death in group 1 (the M group)
+// and - indicates a death in group 2 (the N group).
+extern std::map< std::pair<battleid_t, unsigned>, std::map< std::string, unsigned> > death_orderings;
+#endif
 
 // Lambda-related
 double lambda = 1.0;
@@ -56,7 +67,11 @@ bool allow_negative_theta = false;
 
 // Theta Lognormal prior
 double theta_prior_mu = 0.0;
+#if defined(INFORMATIVE_PRIOR_FOR_DEBUGGING)
+double theta_prior_sigma = 1.0;
+#else
 double theta_prior_sigma = 100.0;
+#endif
 double theta_prior_mean = exp(theta_prior_mu + theta_prior_sigma*theta_prior_sigma/2);
 double log_theta_prior_denom = log(theta_prior_sigma) + 0.5*log(2.0*M_PI);
 
@@ -75,7 +90,11 @@ bool fix_alpha = false;
 
 // Alpha Lognormal prior
 double alpha_prior_mu = 0.0;
+#if defined(INFORMATIVE_PRIOR_FOR_DEBUGGING)
+double alpha_prior_sigma = 1.0;
+#else
 double alpha_prior_sigma = 100.0;
+#endif
 double alpha_prior_mean = exp(alpha_prior_mu + pow(alpha_prior_sigma,2)/2);
 double log_alpha_prior_denom = log(alpha_prior_sigma) + 0.5*log(2.0*M_PI);
 
@@ -94,7 +113,11 @@ bool fix_R = false;
 
 // R Lognormal prior
 double R_prior_mu = 0.0;
+#if defined(INFORMATIVE_PRIOR_FOR_DEBUGGING)
+double R_prior_sigma = 1.0;
+#else
 double R_prior_sigma = 100.0;
+#endif
 double R_prior_mean = exp(R_prior_mu + R_prior_sigma*R_prior_sigma/2);
 double log_R_prior_denom = log(R_prior_sigma) + 0.5*log(2.0*M_PI);
 
@@ -192,6 +215,7 @@ void processCommandLineOptions(int argc, char * argv[]) {
         ("datafile,d",    boost::program_options::value(&data_file_name),        "name of the data file to read")
         ("outfile,o",     boost::program_options::value(&output_file_prefix),    "output file name prefix (a number and .txt will be added to this)")
         ("replace",       boost::program_options::value<bool>(&replace_outfile), "OK to replace output file if it already exists? yes/no")
+        ("prior-only",    boost::program_options::value<bool>(&prior_only),      "if yes, MCMC will explore the prior (log-likelihood zero for all parameter values)).")
         ("battle",        boost::program_options::value(&which_battles),         "ID of the battles to process (may be used multiple times)")
         ("saveevery",     boost::program_options::value(&save_every),            "determines how often to save parameters to output file")
         ("burninevery",   boost::program_options::value(&burnin_every),          "determines how often to report progress during burn-in phase")
@@ -287,6 +311,12 @@ void processCommandLineOptions(int argc, char * argv[]) {
     // If user specified --show-battles on command line, set flag
     if (vm.count("show-battles") > 0) {
         show_battles = true;
+    }
+    
+    // If user specified --prior-only on command line, set flag
+    if (vm.count("prior-only") > 0) {
+        if (prior_only)
+            do_postpred = false;
     }
     
     // If user specified --stan on command line, ensure it was a valid option
@@ -728,15 +758,18 @@ double calcLogLikelihoodForEpoch(battleid_t battle_id, unsigned k) {
 double calcLogLikelihood() {
     double lnL = 0.0;
         
-    for (auto b = which_battles.begin(); b != which_battles.end(); b++) {
-        battleid_t battle_id = *b;
-        for (unsigned k = 0; k < nepochs[battle_id]; k++) {
-            double lnLk = calcLogLikelihoodForEpoch(battle_id, k);
-            assert(lnLk == lnLk);
-            assert(!isnan(lnLk));
-            lnL += lnLk;
+    if (!::prior_only) {
+        for (auto b = which_battles.begin(); b != which_battles.end(); b++) {
+            battleid_t battle_id = *b;
+            for (unsigned k = 0; k < nepochs[battle_id]; k++) {
+                double lnLk = calcLogLikelihoodForEpoch(battle_id, k);
+                assert(lnLk == lnLk);
+                assert(!isnan(lnLk));
+                lnL += lnLk;
+            }
         }
     }
+    
     return lnL;
 }
 
@@ -804,13 +837,63 @@ double calcLogRefDistR(double x) {
     return -pow(log(x) - R_refdist_mu, 2.0)/(2.0*pow(R_refdist_sigma,2)) - log_R_prior_denom - log(x);
 }
 
+#if defined(TALLY_DEATH_ORDER)
+void tallyDeathOrder(battleid_t battle, unsigned epoch) {
+    // Determine ordering
+    std::string ordering = "";
+    tick_vect_vect_t & epochs0 = ticks0[battle];
+    std::vector<Tick> & v0 = epochs0[epoch];
+    tick_vect_vect_t & epochs1 = ticks1[battle];
+    std::vector<Tick> & v1 = epochs1[epoch];
+    unsigned nticks0 = (unsigned)v0.size();
+    unsigned nticks1 = (unsigned)v1.size();
+    unsigned next0 = 1;
+    unsigned next1 = 1;
+    while (next0 < nticks0 - 1 || next1 < nticks1 - 1) {
+        double t0 = v0[next0].tcurr;
+        double t1 = v1[next1].tcurr;
+        if (t0 < t1) {
+            ordering += "*";
+            next0++;
+        }
+        else {
+            ordering += ".";
+            next1++;
+        }
+    }
+    
+    //std::cerr << "ordering = " << ordering << std::endl;
+
+    // Get an iterator to the entry for this battle and epoch, if it exists
+    auto p = std::make_pair(battle, epoch);
+    auto iter = death_orderings.find(p);
+    if (iter == death_orderings.end()) {
+        // First entry for this battle and epoch
+        death_orderings[p][ordering] = 1;
+    }
+    else {
+        // An ordering has already been stored for this battle and epoch
+        // Find iter corresponding to this ordering, if it exists
+        auto ordering_iter = death_orderings[p].find(ordering);
+        if (ordering_iter == death_orderings[p].end()) {
+            // This ordering not yet seen
+            death_orderings[p][ordering] = 1;
+        }
+        else {
+            // This ordering seen, just update count
+            death_orderings[p][ordering]++;
+        }
+    }
+}
+#endif
+
 void updatePositionGroup(battleid_t battle_id, unsigned g, unsigned k) {
     tick_vect_vect_t & battle_ticks0 = ticks0[battle_id];
     tick_vect_vect_t & battle_ticks1 = ticks1[battle_id];
     std::vector<Tick> & ticks = (g == 0 ? battle_ticks0[k] : battle_ticks1[k]);
     unsigned nticks = (unsigned)ticks.size();
     if (nticks == 2)
-        return;
+        return; // no deaths for this group in this epoch
        
     // Pick a tick to modify (not first and not last, as those are not parameters of the model)
     double u = lot.uniform();
@@ -1488,6 +1571,14 @@ void saveParameters(unsigned iteration) {
     }
     
     if (!tuning && iteration > 0 && iteration % save_every == 0) {
+#if defined(TALLY_DEATH_ORDER)
+        for (auto b = which_battles.begin(); b != which_battles.end(); b++) {
+            battleid_t battle_id  = *b;
+            for (unsigned k = 0; k < nepochs[battle_id]; k++) {
+                tallyDeathOrder(battle_id, k);
+            }
+        }
+#endif
         sampled_lambda.push_back(lambda);
         sampled_theta.push_back(theta);
         sampled_alpha.push_back(alpha);

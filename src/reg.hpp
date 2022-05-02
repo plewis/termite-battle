@@ -20,6 +20,7 @@
 //  OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 //  SOFTWARE.
 #pragma once
+#include "conditionals.hpp"
 
 // Regression coefficients
 //   beta_0 = intercept for group 0 (M)

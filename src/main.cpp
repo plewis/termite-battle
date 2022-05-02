@@ -56,6 +56,7 @@
 #include <boost/math/special_functions/gamma.hpp>
 #include "lot.hpp"
 #include "tbtypes.hpp"
+#include "conditionals.hpp"
 
 std::string     program_name          = "termitebattle";
 unsigned        major_version         = 2;
@@ -113,11 +114,17 @@ std::string     model_name            = "ODE Model";
 //    - added logP (log prior) and logF (log reference density) to output files so that restart is possible
 //    - added option ssrestart option so that user can restart at the stone index indicated
 //    - ssrestart useful in case program crashes after working on steppingstone for many hours!
+// v2.5 (27-Mar-2022)
+//    - added prior_only to allow exploration of the prior
+//    - added conditionals.hpp file containing definitions of conditional compilation macros
 
 // Output-related
 bool do_save_output = true;
 std::ofstream screenf;
 std::ofstream outf;
+
+// Data related
+bool prior_only = false;
 
 // Posterior-predictive-related
 bool do_postpred = true;
@@ -183,6 +190,15 @@ tick_map_t      ticks0;     // e.g. ticks0[battle=58][epoch=0] = {Tick(0,25,0,0)
 tick_map_t      ticks1;     // e.g. ticks1[battle=58][epoch=0] = {Tick(1,25,0,0), Tick(1,25,0,1),
                             //                                    Tick(1,24,1,2), Tick(1,23,2,3),
                             //                                    Tick(1,22,3,4), Tick(1,21,4,5)}
+                            
+#if defined(TALLY_DEATH_ORDER)
+// death_orderings stored, for each battle and epoch, a map relating a particular ordering of deaths
+// (key) to a count of the number of iterations in which that ordering was in place. Each ordering
+// is stored as a string of * and . characters, where * indicates a death in group 1 (the M group)
+// and - indicates a death in group 2 (the N group). Note that the counts indicate iterations, not
+// samples: thinning is not used here because this is only a debugging tool.
+std::map< std::pair<battleid_t, unsigned>, std::map< std::string, unsigned> > death_orderings;
+#endif
 
 // Pseudorandom number generator
 unsigned random_number_seed = 0;
@@ -1721,6 +1737,30 @@ void savePostPredPlotsRFiles() {
     shellf.close();
 }
 
+#if defined(TALLY_DEATH_ORDER)
+void debugShowOrderTally() {
+    // death_orderings is a map with keys equal to battle-epoch pairs and
+    // values equal to maps relating ordering strings (keys) to counts (values)
+    consoleOutput("\nReport on death orderings for each battle and epoch:");
+
+    // Report counts for each battle and epoch
+    for (auto epoch_iter = death_orderings.begin(); epoch_iter != death_orderings.end(); epoch_iter++) {
+        auto key          = epoch_iter->first;
+        auto value        = epoch_iter->second;
+
+        battleid_t battle = key.first;
+        unsigned epoch    = key.second;
+        consoleOutput(boost::format("\n  Battle %d, epoch %d:") % battle % epoch);
+
+        for (auto order_iter = value.begin(); order_iter != value.end(); order_iter++) {
+            consoleOutput(boost::format("\n  %12d %s") % order_iter->second % order_iter->first);
+        }
+    }
+    consoleOutput("\n");
+}
+#endif
+
+
 void run() {
     battles.clear();
     epochs.clear();
@@ -1728,6 +1768,10 @@ void run() {
     checkBattlesFound();
     if (show_battles)
         showData();
+        
+    if (prior_only) {
+        consoleOutput("\nExploring prior (log-likelihood zero for all parameter combinations)");
+    }
     
     if (stan != "none") {
         savePySTAN();
@@ -1744,6 +1788,9 @@ void run() {
         }
     }
     
+#if defined(TALLY_DEATH_ORDER)
+    debugShowOrderTally();
+#endif
 }
 
 int main(int argc, char * argv[]) {
