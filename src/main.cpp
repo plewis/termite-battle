@@ -20,18 +20,7 @@
 //  OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 //  SOFTWARE.
 
-//#define USE_BOOST_REGEX
-//#define XANADU_STAN
-
-// If defined, this program will carry out the binomial regression itself
-// If undefined, this program will generate RSTAN and PySTAN files for carrying
-// out the regression analysis. STAN is a better choice for this model, so
-// leaving this line commented out is preferred.
-//#define USE_REGRESSION_MODEL
-
-#if !defined(USE_REGRESSION_MODEL)
-#   define USE_ODE_MODEL
-#endif
+#include "conditionals.hpp"
 
 #include <fstream>
 #include <iostream>
@@ -54,19 +43,18 @@
 #include <boost/algorithm/string/join.hpp>
 #include <boost/range/adaptor/transformed.hpp>
 #include <boost/math/special_functions/gamma.hpp>
+
+using namespace std;
+
 #include "lot.hpp"
 #include "tbtypes.hpp"
-#include "conditionals.hpp"
+#include "sojourn.hpp"
 
-std::string     program_name          = "termitebattle";
-unsigned        major_version         = 2;
-unsigned        minor_version         = 5;
+string     program_name          = "termitebattle";
+unsigned   major_version         = 2;
+unsigned   minor_version         = 6;
 
-#if defined(USE_REGRESSION_MODEL)
-std::string     model_name            = "Binomial Regression Model";
-#else
-std::string     model_name            = "ODE Model";
-#endif
+string     model_name            = "ODE Model";
 
 // v1.1
 //    starting version
@@ -117,38 +105,44 @@ std::string     model_name            = "ODE Model";
 // v2.5 (27-Mar-2022)
 //    - added prior_only to allow exploration of the prior
 //    - added conditionals.hpp file containing definitions of conditional compilation macros
+//    - added INFORMATIVE_PRIOR_FOR_DEBUGGING macro to allow testing whether running on prior works as expected
+//    - added TALLY_DEATH_ORDER to help answer reviewers question about whether all possible orderings are able to be visited
+//    - this version tagged "v2.5" and was the version used in the Proceedings of the Royal Society B paper
+// v2.6 (2-May-2022)
+//    - implements LoRaD method for estimating marginal likelihood
+//    - added sigma_ratio setting to allow theta-alpha joint proposal to be tweaked
+//    - added reference distributions for sojourn fractions
+//    - added nspacerticks setting to allow user to set number of spacer ticks between each death
+// v3.0 (20-June-2022)
+//    - removed INFORMATIVE_PRIOR_FOR_DEBUGGING macro
 
 // Output-related
 bool do_save_output = true;
-std::ofstream screenf;
-std::ofstream outf;
+ofstream screenf;
+ofstream outf;
+
+bool do_lorad = true;
+ofstream loradf;
 
 // Data related
 bool prior_only = false;
 
 // Posterior-predictive-related
-bool do_postpred = true;
+bool do_postpred = false;
 post_pred_data_t post_pred_data0;
 post_pred_data_t post_pred_data1;
 // post_pred_data0[battle][epoch] = {8, 4, 5, 6, 4, 4, 7, 3, 3, 6, ..., 5}
-std::string plot = "none"; // none, expected, or postpred
-
-// if defined, use distribution from Taylor & Karlin (1985), p.218, eq. 6.13
-// to generate posterior predictive data for the ode model
-// Can only be used when analyzing battle 50 only (in which group 0 suffers no losses).
-//#define TAYLOR_KARLIN_CHECK
-#if defined(TAYLOR_KARLIN_CHECK)
-post_pred_data_t post_pred_data_tmp;
-post_pred_data_t post_pred_data_tmp2;
-#endif
+string plot = "none"; // none, expected, or postpred
 
 // MCMC settings
-unsigned        burnin_every          = 1000;
-unsigned        report_every          = 1000;
-unsigned        save_every            = 10;
-unsigned        num_samples           = 1000;
-unsigned        num_burnin_iterations = 1000;
-unsigned        num_iterations        = num_samples*save_every;
+unsigned burnin_every          = 1000;
+unsigned report_every          = 1000;
+unsigned save_every            = 10;
+unsigned num_samples           = 1000;
+unsigned num_burnin_iterations = 1000;
+unsigned num_iterations        = num_samples*save_every;
+
+unsigned debug_iteration = 0;   // used for debugging to know exactly which iteration something happened
 
 // Proposal tuning
 bool tuning = true;
@@ -156,30 +150,38 @@ double target_acceptance = 0.4;
 
 // Likelihood
 double log_likelihood0 = 0.0;
-double log_zero = std::numeric_limits<double>::lowest();
+double log_zero = numeric_limits<double>::lowest();
 
 // Battle choice
-std::string     data_file_name        = "";
-std::string     output_file_prefix    = "";
-std::string     output_file_name      = "";
-bool            replace_outfile       = false;
-bool            show_battles          = false;
-nepochs_map_t   nepochs;
-battleid_vect_t which_battles;
-found_map_t     battle_found;
+string       data_file_name        = "";
+string       output_file_prefix    = "";
+string       output_file_name      = "";
+string       LoRaD_file_prefix     = "";
+string       LoRaD_file_name       = "";
+bool              replace_outfile       = false;
+bool              replace_LoRaDfile     = false;
+//bool              fix_ticks             = false;
+bool              show_battles          = false;
+nepochs_map_t     nepochs;
+battleid_vect_t   which_battles;
+sojorn_refdists_t sojourn_refdists;
+tick_spec_t       tick_specifications;
+found_map_t       battle_found;
+unsigned          nspacers              = 1;      // number of spacer events separating each pair of deaths
 
 // STAN options
-std::string     stan                  = "none"; // none, equal (beta0=beta1,beta3), full (beta0,beta1,beta3)
+string     stan                  = "none"; // none, equal (beta0=beta1,beta3), full (beta0,beta1,beta3)
 bool            binomcoeff            = true;   // yes (include binomial coefficients in STAN files) or no (do not include them)
 
 // Steppingstone marginal likelihood estimation
-bool            refdist_provided      = false;
-unsigned        nstones               = 0;
-unsigned        ss_restart            = 0;
-double          ss_alpha              = 0.3;
-double          ss_beta               = 1.0;
-double_vect_t   ss_beta_values;
-double_vect_t   ss_terms;
+bool                 refdist_provided      = false;
+unsigned             nstones               = 0;
+unsigned             ss_restart            = 0;
+double               ss_alpha              = 1.0;
+double               ss_beta               = 1.0;
+double_vect_t        ss_beta_values;
+double_vect_t        ss_terms;
+//SojournFractionStore sojourn_store;
 
 // Data containers
 // Tick(group=1, nalive=24, tprev=1.379, ncurr=2.098)
@@ -191,30 +193,21 @@ tick_map_t      ticks1;     // e.g. ticks1[battle=58][epoch=0] = {Tick(1,25,0,0)
                             //                                    Tick(1,24,1,2), Tick(1,23,2,3),
                             //                                    Tick(1,22,3,4), Tick(1,21,4,5)}
                             
-#if defined(TALLY_DEATH_ORDER)
-// death_orderings stored, for each battle and epoch, a map relating a particular ordering of deaths
-// (key) to a count of the number of iterations in which that ordering was in place. Each ordering
-// is stored as a string of * and . characters, where * indicates a death in group 1 (the M group)
-// and - indicates a death in group 2 (the N group). Note that the counts indicate iterations, not
-// samples: thinning is not used here because this is only a debugging tool.
-std::map< std::pair<battleid_t, unsigned>, std::map< std::string, unsigned> > death_orderings;
-#endif
-
 // Pseudorandom number generator
 unsigned random_number_seed = 0;
 termite::Lot lot;
 
-void consoleOutput(std::string s) {
+void consoleOutput(string s) {
     screenf << s;
-    std::cout << s;
+    cout << s;
 }
 
 void consoleOutput(boost::format s) {
     screenf << s;
-    std::cout << s;
+    cout << s;
 }
 
-void readDataFile(std::string filename) {
+void readDataFile(string filename) {
     consoleOutput(boost::format("Reading data from file \"%s\"\n") % filename);
     
     // Initialize battle_found map with 0 for every battle ID in which_battles
@@ -224,10 +217,10 @@ void readDataFile(std::string filename) {
     }
     
     // Store contents of data file in buffer
-    std::ifstream dataf(filename);
-    std::stringstream buffer;
+    ifstream dataf(filename);
+    stringstream buffer;
     buffer << dataf.rdbuf();
-    std::string data = buffer.str();
+    string data = buffer.str();
     
     //bugfix 2020-Oct-02: Check to make sure blank lines are actually empty
 #if defined(USE_BOOST_REGEX)
@@ -235,25 +228,25 @@ void readDataFile(std::string filename) {
     auto empty_begin = boost::sregex_iterator(data.begin(), data.end(), empty_regex);
     auto empty_end   = boost::sregex_iterator();
 #else
-    std::regex empty_regex("\\n(\\s+)\\n");
-    auto empty_begin = std::sregex_iterator(data.begin(), data.end(), empty_regex);
-    auto empty_end   = std::sregex_iterator();
+    regex empty_regex("\\n(\\s+)\\n");
+    auto empty_begin = sregex_iterator(data.begin(), data.end(), empty_regex);
+    auto empty_end   = sregex_iterator();
 #endif
-    unsigned nmatches = (unsigned)std::distance(empty_begin, empty_end);
+    unsigned nmatches = (unsigned)distance(empty_begin, empty_end);
     if (nmatches > 0) {
-        std::stringstream tmp;
-        std::string remains;
+        stringstream tmp;
+        string remains;
         for (auto b = empty_begin; b != empty_end; b++) {
             tmp << b->prefix();
             tmp << "\n\n";
             remains = b->suffix();
         }
-        tmp << remains << "\n" << std::endl;
+        tmp << remains << "\n" << endl;
         
         // Replace data with version having no non-empty blank lines
         data = tmp.str();
 
-        //std::ofstream tmpf("doof.txt");
+        //ofstream tmpf("doof.txt");
         //tmpf << tmp.rdbuf();
         //tmpf.close();
     }
@@ -266,25 +259,28 @@ void readDataFile(std::string filename) {
     auto battles_begin = boost::sregex_iterator(data.begin(), data.end(), battle_regex);
     auto battles_end   = boost::sregex_iterator();
 #else
-    std::regex battle_regex("Battle\\s+(\\d+)\\s*:\\s*(\\S+)\\s+(\\S+)\\s+([\\S\\s]+?)\\n\\n");
-    auto battles_begin = std::sregex_iterator(data.begin(), data.end(), battle_regex);
-    auto battles_end   = std::sregex_iterator();
+    regex battle_regex("Battle\\s+(\\d+)\\s*:\\s*(\\S+)\\s+(\\S+)\\s+([\\S\\s]+?)\\n\\n");
+    auto battles_begin = sregex_iterator(data.begin(), data.end(), battle_regex);
+    auto battles_end   = sregex_iterator();
 #endif
-    consoleOutput(boost::format("Found %d battles\n") % std::distance(battles_begin, battles_end));
+    consoleOutput(boost::format("Found %d battles\n") % distance(battles_begin, battles_end));
+    double max_num_combos = 0.0;
+    unsigned max_num_combos_battle = 0;
+    unsigned max_num_combos_epoch = 0;
     for (auto b = battles_begin; b != battles_end; b++) {
-        std::string battle_id_string = (*b)[1];
-        battleid_t  battle_id   = std::stoi(battle_id_string);
-        std::string mcolony     = (*b)[2];
-        std::string ncolony     = (*b)[3];
-        std::string battle_data = (*b)[4];
-        battles[battle_id] = std::make_pair(mcolony,ncolony);
+        string battle_id_string = (*b)[1];
+        battleid_t  battle_id   = stoi(battle_id_string);
+        string mcolony     = (*b)[2];
+        string ncolony     = (*b)[3];
+        string battle_data = (*b)[4];
+        battles[battle_id] = make_pair(mcolony,ncolony);
         if (which_battles.size() == 0) {
             // By default use first battle
             which_battles.push_back(battle_id);
             battle_found[battle_id] = 1;
         }
         else {
-            auto which = std::find(which_battles.begin(), which_battles.end(), battle_id);
+            auto which = find(which_battles.begin(), which_battles.end(), battle_id);
             if (which != which_battles.end())
                 battle_found[*which] = 1;
         }
@@ -297,30 +293,74 @@ void readDataFile(std::string filename) {
         auto epochs_begin = boost::sregex_iterator(battle_data.begin(), battle_data.end(), epoch_regex);
         auto epochs_end   = boost::sregex_iterator();
 #else
-        std::regex epoch_regex("\\s*(\\d+)\\s+(\\d+)\\s+(\\d+)");
-        auto epochs_begin = std::sregex_iterator(battle_data.begin(), battle_data.end(), epoch_regex);
-        auto epochs_end   = std::sregex_iterator();
+        regex epoch_regex("\\s*(\\d+)\\s+(\\d+)\\s+(\\d+)");
+        auto epochs_begin = sregex_iterator(battle_data.begin(), battle_data.end(), epoch_regex);
+        auto epochs_end   = sregex_iterator();
 #endif
+
+// Battle 267:   R    S
+// 0	40	10
+// 5	38	3
+// 10	35	0
+//
+// Battle 268:  R    S
+// 0	40	10
+// 5	37	3
+// 10	37	1
+// 15	36	1
+// 20	35	0
+//
+// Battle 270:  R    S
+// 0	40	10
+// 5	38	1
+// 10	37	0
+
+        if (battle_id == 267) {
+            cerr << "found battle 267" << endl;
+        }
+        double tprev = 0.0;
+        int mprev = -1;
+        int nprev = -1;
+        unsigned epoch_number = 0;
         for (auto epoch = epochs_begin; epoch != epochs_end; epoch++) {
-            assert(epoch->size() == 4);
-            unsigned time = (unsigned)std::stoi((*epoch)[1].str());
-            unsigned m = (unsigned)std::stoi((*epoch)[2].str());
-            unsigned n = (unsigned)std::stoi((*epoch)[3].str());
-            epoch_t epoch_tuple = std::make_tuple(time, m, n);
+            assert(epoch->size() == 4); // 0: total match, 1: time, 2:m, 3:n
+            unsigned time = (unsigned)stoi((*epoch)[1].str());
+            unsigned m = (unsigned)stoi((*epoch)[2].str());
+            unsigned n = (unsigned)stoi((*epoch)[3].str());
+            if (mprev > -1 && nprev > -1) {
+                epoch_number++;
+                unsigned mdeaths = mprev - m;
+                unsigned ndeaths = nprev - n;
+                unsigned total_deaths = mdeaths + ndeaths;
+                double log_num_combos = lgamma(total_deaths + 1) - lgamma(mdeaths + 1) - lgamma(ndeaths + 1);
+                double num_combos = exp(log_num_combos);
+                if (num_combos > max_num_combos) {
+                    max_num_combos = num_combos;
+                    max_num_combos_battle = battle_id;
+                    max_num_combos_epoch = epoch_number;
+                }
+            }
+            epoch_t epoch_tuple = make_tuple(time, m, n, tprev, (mprev < 0 ? m : mprev), (nprev < 0 ? n : nprev));
             epochs[battle_id].push_back(epoch_tuple);
+            mprev = m;
+            nprev = n;
+            tprev = time;
         }
     }
+    consoleOutput(boost::format("Maximum number of combinations was %g\n") % max_num_combos);
+    consoleOutput(boost::format("  battle: %d\n") % max_num_combos_battle);
+    consoleOutput(boost::format("  epoch:  %d\n") % max_num_combos_epoch);
     consoleOutput("\n");
 }
 
-void showBattle(battleid_t battle_id, std::string mcolony, std::string ncolony) {
+void showBattle(battleid_t battle_id, string mcolony, string ncolony) {
     // Show battle id and colony names
     consoleOutput(boost::format("\nBattle %d (%d vs %d)\n") % battle_id % mcolony % ncolony);
-    std::vector<epoch_t> & epoch_vect = epochs[battle_id];
+    vector<epoch_t> & epoch_vect = epochs[battle_id];
     
     // Show time, m, and n for each epoch, one epoch per line
     for (auto epoch = epoch_vect.begin(); epoch != epoch_vect.end(); epoch++) {
-        consoleOutput(boost::format("%12d %12d %12d\n") % std::get<0>(*epoch) % std::get<1>(*epoch) % std::get<2>(*epoch));
+        consoleOutput(boost::format("%12d %12d %12d\n") % get<0>(*epoch) % get<1>(*epoch) % get<2>(*epoch));
     }
 }
 
@@ -328,168 +368,303 @@ void showData(bool all = false) {
     if (all) {
         for (auto b = battles.begin(); b != battles.end(); b++) {
             battleid_t battle_id  = b->first;
-            std::string mcolony   = b->second.first;
-            std::string ncolony   = b->second.second;
+            string mcolony   = b->second.first;
+            string ncolony   = b->second.second;
             showBattle(battle_id, mcolony, ncolony);
         }
     }
     else {
         for (auto b = which_battles.begin(); b != which_battles.end(); b++) {
             battleid_t battle_id  = *b;
-            std::string mcolony   = battles[battle_id].first;
-            std::string ncolony   = battles[battle_id].second;
+            string mcolony   = battles[battle_id].first;
+            string ncolony   = battles[battle_id].second;
             showBattle(battle_id, mcolony, ncolony);
         }
     }
-    std::exit(1);
+    //exit(1);
 }
 
 void showEpochsForBattle(battleid_t battle_id) {
     // Show battle id and colony names
     auto & b = battles[battle_id];
-    std::string mcolony = b.first;
-    std::string ncolony = b.second;
+    string mcolony = b.first;
+    string ncolony = b.second;
     consoleOutput(boost::format("\nBattle %d (%d vs %d)\n") % battle_id % mcolony % ncolony);
     epoch_vect_t & battle_epochs = epochs[battle_id];
     
     // Show time, m, and n for each epoch, one epoch per line
     for (auto epoch = battle_epochs.begin(); epoch != battle_epochs.end(); epoch++) {
-        consoleOutput(boost::format("%12d %12d %12d\n") % std::get<0>(*epoch) % std::get<1>(*epoch) % std::get<2>(*epoch));
+        consoleOutput(boost::format("%12d %12d %12d\n") % get<0>(*epoch) % get<1>(*epoch) % get<2>(*epoch));
     }
 }
 
 void showVersion() {
-    std::string mpiversion = "";
+    string mpiversion = "";
     consoleOutput(boost::format("This is %s version %d.%d %s\n(%s)\n") % program_name % major_version % minor_version % mpiversion % model_name);
     consoleOutput("Written by Paul O. Lewis <paul.lewis@uconn.edu>\n");
     consoleOutput(boost::format("Date compiled: %s\n\n") % __DATE__);
 }
 
-void createTicks(battleid_t battle_id, unsigned k) {
-    epoch_vect_t & battle_epochs = epochs[battle_id];
-    double t0 = std::get<0>(battle_epochs[k]);
-    unsigned m0 = std::get<1>(battle_epochs[k]);
-    unsigned n0 = std::get<2>(battle_epochs[k]);
-
-    double t1 = std::get<0>(battle_epochs[k+1]);
-    unsigned m1 = std::get<1>(battle_epochs[k+1]);
-    unsigned n1 = std::get<2>(battle_epochs[k+1]);
-
-    //bugfix 2020-Sep-09: added this to catch typos in battle data
-    if ((m1 > m0) || (n1 > n0)) {
-        std::cerr << "Battle " << battle_id << " has problems." << std::endl;
-        throw XImpossibleBattle();
-    }
-
-    unsigned mticks = m0 - m1;
-    unsigned nticks = n0 - n1;
+bool tickSanityCheck(unsigned battle_id, unsigned epoch, bool fix_it) {
+    bool sane = true;
     
-    // Create tick marks representing deaths in group 0
-    tick_vect_vect_t & battle_ticks0 = ticks0[battle_id];
-    double prev = t0;
-    double curr = t0;
-    double incr = (t1 - t0)/(mticks + 1);
-    battle_ticks0.push_back(std::vector<Tick>());
-    battle_ticks0[k].push_back(Tick(0, m0, prev, t0));
-#if defined(USE_ODE_MODEL)
-    for (unsigned i = 0; i < mticks; i++) {
-        curr = t0 + incr*(i + 1);
-        battle_ticks0[k].push_back(Tick(0, m0-i, prev, curr));
-        prev = curr;
-    }
-#endif
-    battle_ticks0[k].push_back(Tick(0, m1, prev, t1));
-
-    // Create tick marks representing deaths in group 1
-    tick_vect_vect_t & battle_ticks1 = ticks1[battle_id];
-    prev = t0;
-    curr = t0;
-    incr = (t1 - t0)/(nticks + 1);
-    battle_ticks1.push_back(std::vector<Tick>());
-    battle_ticks1[k].push_back(Tick(1, n0, prev, t0));
-#if defined(USE_ODE_MODEL)
-    for (unsigned i = 0; i < nticks; i++) {
-        curr = t0 + incr*(i + 1);
-        battle_ticks1[k].push_back(Tick(1, n0-i, prev, curr));
-        prev = curr;
-    }
-#endif
-    battle_ticks1[k].push_back(Tick(1, n1, prev, t1));
-    
-    if ((m0 == 0 && n0 > 0) || (n0 == 0 && m0 > 0))
-        throw XBadBattle();
-
-#if defined(USE_ODE_MODEL)
     // If one group goes to zero, ensure that the final death in that
     // group comes after all deaths in the other group (otherwise the
     // likelihood will equal zero at the start)
+    tick_vect_vect_t & battle_ticks0 = ticks0[battle_id];
+    tick_vect_vect_t & battle_ticks1 = ticks1[battle_id];
+    epoch_vect_t & battle_epochs = epochs[battle_id];
+
+    //double t0 = get<0>(battle_epochs[epoch]);
+    //unsigned m0 = get<1>(battle_epochs[epoch]);
+    //unsigned n0 = get<2>(battle_epochs[epoch]);
+
+    double t1 = get<0>(battle_epochs[epoch+1]);
+    unsigned m1 = get<1>(battle_epochs[epoch+1]);
+    unsigned n1 = get<2>(battle_epochs[epoch+1]);
+
     if (m1 == 0) {
         // Group 0 was completely eliminated
         
         // Find time of penultimate tick for group 0
-        auto rit0 = battle_ticks0[k].rbegin();
+        auto rit0 = battle_ticks0[epoch].rbegin();
         assert(rit0->tcurr == t1);
         rit0++;
         double time_last_death_group0 = rit0->tcurr;
         
         // Find time of penultimate tick for group 1
-        auto rit1 = battle_ticks1[k].rbegin();
+        auto rit1 = battle_ticks1[epoch].rbegin();
         assert(rit1->tcurr == t1);
         rit1++;
         double time_last_death_group1 = rit1->tcurr;
         
         if (time_last_death_group0 < time_last_death_group1) {
-            // Move time of last death in group 0 to after last death in group 1
-            // because can't explain death in group 1 if group 0 has zero combatants
-            rit0->tcurr = (time_last_death_group1 + t1)/2.0;
-            battle_ticks0[k].rbegin()->tprev = rit0->tcurr;
+            if (fix_it) {
+                // Move time of last death in group 0 to after last death in group 1
+                // because can't explain death in group 1 if group 0 has zero combatants
+                rit0->tcurr = (time_last_death_group1 + t1)/2.0;
+                battle_ticks0[epoch].rbegin()->tprev = rit0->tcurr;
+            }
+            sane = false;
         }
     }
     else if (n1 == 0) {
         // Group 1 was completely eliminated
         
         // Find time of penultimate tick for group 0
-        auto rit0 = battle_ticks0[k].rbegin(); //bugfix 2020-Sep-09: was battle_ticks1
+        auto rit0 = battle_ticks0[epoch].rbegin(); //bugfix 2020-Sep-09: was battle_ticks1
         assert(rit0->tcurr == t1);
         rit0++;
         double time_last_death_group0 = rit0->tcurr;
         
         // Find time of penultimate tick for group 1
-        auto rit1 = battle_ticks1[k].rbegin();
+        auto rit1 = battle_ticks1[epoch].rbegin();
         assert(rit1->tcurr == t1);
         rit1++;
         double time_last_death_group1 = rit1->tcurr;
 
         if (time_last_death_group1 <= time_last_death_group0) { //bugfix 2020-Sep-09: was <
-            // Move time of last death in group 1 to after last death in group 0
-            // because can't explain death in group 0 if group 1 has zero combatants
-            rit1->tcurr = (time_last_death_group0 + t1)/2.0;
-            battle_ticks1[k].rbegin()->tprev = rit1->tcurr;
+            if (fix_it) {
+                // Move time of last death in group 1 to after last death in group 0
+                // because can't explain death in group 0 if group 1 has zero combatants
+                rit1->tcurr = (time_last_death_group0 + t1)/2.0;
+                battle_ticks1[epoch].rbegin()->tprev = rit1->tcurr;
+            }
+            sane = false;
         }
     }
-#endif
+    return sane;
 }
 
-#if defined(USE_REGRESSION_MODEL)
-#   include "reg.hpp"
-#else
-#   include "ode.hpp"
-#endif
+//void createTicks(battleid_t battle_id, unsigned k) {
+//    epoch_vect_t & battle_epochs = epochs[battle_id];
+//    double t0 = get<0>(battle_epochs[k]);
+//    unsigned m0 = get<1>(battle_epochs[k]);
+//    unsigned n0 = get<2>(battle_epochs[k]);
+//
+//    double t1 = get<0>(battle_epochs[k+1]);
+//    unsigned m1 = get<1>(battle_epochs[k+1]);
+//    unsigned n1 = get<2>(battle_epochs[k+1]);
+//
+//    //bugfix 2020-Sep-09: added this to catch typos in battle data
+//    if ((m1 > m0) || (n1 > n0)) {
+//        cerr << "Battle " << battle_id << " has problems." << endl;
+//        throw XImpossibleBattle();
+//    }
+//
+//    unsigned mticks = m0 - m1;
+//    unsigned nticks = n0 - n1;
+//
+//    // See if ticks were specified for this battle, epoch, and group
+//    vector<double> tick_positions;
+//    bool ticks0_provided = sojourn_store.getTicks(battle_id, k, 0, tick_positions);
+//    if (ticks0_provided) {
+//        assert(tick_positions.size() == mticks + 2);
+//
+//        // Create mticks tick marks representing deaths in group 0
+//        tick_vect_vect_t & battle_ticks0 = ticks0[battle_id];
+//        assert(t0 == tick_positions[0]);
+//        assert(t1 == tick_positions[mticks+1]);
+//        double prev = t0;
+//        double curr = t0;
+//        battle_ticks0.push_back(vector<Tick>());
+//        battle_ticks0[k].push_back(Tick(0, m0, prev, t0)); // group, nalive, tprev, tcurr
+//
+//        for (unsigned i = 1; i <= mticks; i++) {
+//            curr = tick_positions[i];
+//            assert(curr > prev);
+//            battle_ticks0[k].push_back(Tick(0, m0-i+1, prev, curr));
+//            prev = curr;
+//        }
+//        battle_ticks0[k].push_back(Tick(0, m1, prev, t1));
+//    }
+//    else {
+//        // See if reference distribution was defined for this battle, epoch, and group
+//        // For mticks = 3, need mticks + 1 = 4 intervals
+//        // |--------+--------------+-------------+-----------------|
+//        // 40       39             38            37
+//        vector<double> params;
+//        if (mticks > 0 && sojourn_store.isClosed()) {
+//            // If sojourn store is closed, it means reference distributions were provided
+//            bool ok = sojourn_store.copyRefDistParams(battle_id, k, 0, params);
+//            assert(ok);
+//        }
+//        else {
+//            // If no reference distribution, set up params to equal the prior
+//            params.assign(mticks + 1, 1.0 + nspacers);
+//        }
+//        assert(params.size() == mticks + 1);
+//
+//        // Draw mticks + 1 Gamma(params[i],1) random deviates and normalize them to obtain sojourn intervals
+//        vector<double> gammas(mticks + 1);
+//        double sum_gammas = 0.0;
+//        for (unsigned i = 0; i < mticks + 1; i++) {
+//            double gamma_deviate = lot.gamma(params[i], 1.0);
+//            gammas[i] = gamma_deviate;
+//            sum_gammas += gamma_deviate;
+//        }
+//        transform(gammas.begin(), gammas.end(), gammas.begin(), [sum_gammas,t0,t1](double x){return (t1-t0)*x/sum_gammas;});
+//
+//        // Create mticks tick marks representing deaths in group 0
+//        tick_vect_vect_t & battle_ticks0 = ticks0[battle_id];
+//        double prev = t0;
+//        double curr = t0;
+//        battle_ticks0.push_back(vector<Tick>());
+//        battle_ticks0[k].push_back(Tick(0, m0, prev, t0)); // group, nalive, tprev, tcurr
+//
+//        for (unsigned i = 0; i < mticks; i++) {
+//            curr = prev + gammas[i];
+//            assert(curr > prev);
+//            battle_ticks0[k].push_back(Tick(0, m0-i, prev, curr));
+//            prev = curr;
+//        }
+//        battle_ticks0[k].push_back(Tick(0, m1, prev, t1));
+//    }
+//
+//    // See if ticks were specified for this battle, epoch, and group
+//    tick_positions.clear();
+//    bool ticks1_provided = sojourn_store.getTicks(battle_id, k, 1, tick_positions);
+//    if (ticks1_provided) {
+//        assert(tick_positions.size() == nticks + 2);
+//
+//        // Create nticks tick marks representing deaths in group 1
+//        tick_vect_vect_t & battle_ticks1 = ticks1[battle_id];
+//        assert(t0 == tick_positions[0]);
+//        assert(t1 == tick_positions[nticks+1]);
+//        double prev = t0;
+//        double curr = t0;
+//        battle_ticks1.push_back(vector<Tick>());
+//        battle_ticks1[k].push_back(Tick(1, n0, prev, t0)); // group, nalive, tprev, tcurr
+//
+//        for (unsigned i = 1; i <= nticks; i++) {
+//            curr = tick_positions[i];
+//            assert(curr > prev);
+//            battle_ticks1[k].push_back(Tick(1, n0-i+1, prev, curr));
+//            prev = curr;
+//        }
+//        battle_ticks1[k].push_back(Tick(1, n1, prev, t1));
+//    }
+//    else {
+//        // See if reference distribution was defined for this battle, epoch, and group
+//        // For nticks = 3, need nticks + 1 = 4 intervals
+//        // |--------+--------------+-------------+-----------------|
+//        // 40       39             38            37
+//        vector<double> params;
+//        if (nticks > 0 && sojourn_store.isClosed()) {
+//            bool found = sojourn_store.copyRefDistParams(battle_id, k, 1, params);
+//            assert(found);
+//        }
+//        else {
+//            // If no reference distribution, set up params to equal the prior
+//            params.assign(nticks + 1, 1.0 + nspacers);
+//        }
+//        assert(params.size() == nticks + 1);
+//
+//        // Draw nticks + 1 Gamma(params[i],1) random deviates and normalize them to obtain sojourn intervals
+//        vector<double> gammas(nticks + 1);
+//        double sum_gammas = 0.0;
+//        for (unsigned i = 0; i < nticks + 1; i++) {
+//            double gamma_deviate = lot.gamma(params[i], 1.0);
+//            gammas[i] = gamma_deviate;
+//            sum_gammas += gamma_deviate;
+//        }
+//        transform(gammas.begin(), gammas.end(), gammas.begin(), [sum_gammas,t0,t1](double x){return (t1-t0)*x/sum_gammas;});
+//
+//        // Create nticks tick marks representing deaths in group 1
+//        tick_vect_vect_t & battle_ticks1 = ticks1[battle_id];
+//        double prev = t0;
+//        double curr = t0;
+//        battle_ticks1.push_back(vector<Tick>());
+//        battle_ticks1[k].push_back(Tick(1, n0, prev, t0)); // group, nalive, tprev, tcurr
+//
+//        for (unsigned i = 0; i < nticks; i++) {
+//            curr = prev + gammas[i];
+//            assert(curr > prev);
+//            battle_ticks1[k].push_back(Tick(1, n0-i, prev, curr));
+//            prev = curr;
+//        }
+//        battle_ticks1[k].push_back(Tick(1, n1, prev, t1));
+//    }
+//
+//    if ((m0 == 0 && n0 > 0) || (n0 == 0 && m0 > 0))
+//        throw XBadBattle();
+//
+//    tickSanityCheck(battle_id, k, true);  // argument true means fix problems
+//
+//    // Save starting ticks in conf file for later reuse
+//    ofstream tickf("ticks.conf", ios::out | ios::app);
+//
+//    // group 0
+//    tick_vect_vect_t & battle_ticks0 = ticks0[battle_id];
+//    tickf << boost::format("tickspec = battle=%d,epoch=%d,group=0,start=%d,end=%d,tickpos=(0.0") % battle_id % k % m0 % m1;
+//    for (unsigned i = 1; i <= mticks; i++) {
+//        tickf << boost::format(",%.5f") % battle_ticks0[k][i].tcurr;
+//    }
+//    tickf << boost::format(",%.5f)\n") % t1;
+//
+//    // group 1
+//    tick_vect_vect_t & battle_ticks1 = ticks1[battle_id];
+//    tickf << boost::format("tickspec = battle=%d,epoch=%d,group=1,start=%d,end=%d,tickpos=(0.0") % battle_id % k % n0 % n1;
+//    for (unsigned i = 1; i <= nticks; i++) {
+//        tickf << boost::format(",%.5f") % battle_ticks1[k][i].tcurr;
+//    }
+//    tickf << boost::format(",%.5f)\n") % t1;
+//
+//    tickf.close();
+//}
+
+#include "ode.hpp"
 
 void initMCMC() {
     consoleOutput("\nStarting parameter values:\n");
-    
+
+    // Overwrite ticks.conf if it exists
+    //ofstream tickf("ticks.conf");
+    //tickf.close();
+
     // Start every MCMC analysis with the same random number seed
     // (makes it easier to debug MPI version)
     lot.setSeed(random_number_seed);
-    
-#if defined(TAYLOR_KARLIN_CHECK)
-    post_pred_data_tmp.clear();
-    post_pred_data_tmp.resize(which_battles.size());
-    
-    post_pred_data_tmp2.clear();
-    post_pred_data_tmp2.resize(which_battles.size());
-#endif
     
     post_pred_data0.clear();
     post_pred_data0.resize(which_battles.size());
@@ -501,25 +676,19 @@ void initMCMC() {
     for (auto b = which_battles.begin(); b != which_battles.end(); b++) {
         battleid_t     battle_id     = *b;
         epoch_vect_t & battle_epochs = epochs[battle_id];
-        ticks0[battle_id].clear();
-        ticks1[battle_id].clear();
-#if defined(TAYLOR_KARLIN_CHECK)
-        post_pred_data_tmp[battle_index].resize(battle_epochs.size());
-        post_pred_data_tmp2[battle_index].resize(battle_epochs.size());
-#endif
-        post_pred_data0[battle_index].resize(battle_epochs.size());
-        post_pred_data1[battle_index].resize(battle_epochs.size());
-                
-        // Create starting ticks for both groups
+    //    ticks0[battle_id].clear();
+    //    ticks1[battle_id].clear();
+    //    post_pred_data0[battle_index].resize(battle_epochs.size());
+    //    post_pred_data1[battle_index].resize(battle_epochs.size());
+    //
+    //    // Create starting ticks for both groups
         nepochs[battle_id] = (unsigned)battle_epochs.size() - 1;
-        for (unsigned k = 0; k < nepochs[battle_id]; k++) {
-            createTicks(battle_id, k);
-        }
-        //debugShowTicks(battle_id);
-#if defined(USE_ODE_MODEL)
-        showRForEachEpoch(battle_id);
-#endif
-
+    //    for (unsigned k = 0; k < nepochs[battle_id]; k++) {
+    //        createTicks(battle_id, k);
+    //    }
+    //    //debugShowTicks(battle_id);
+    //    showRForEachEpoch(battle_id);
+    //
         battle_index++;
     }
     
@@ -528,6 +697,7 @@ void initMCMC() {
     initModelParameters();
     
     // Calculate starting log likelihood
+    calcOrderingInfo();
     log_likelihood0 = calcLogLikelihood();
     consoleOutput(boost::format("  logL  = %.5f\n") % log_likelihood0);
 }
@@ -539,7 +709,19 @@ void checkIfOutputFileExists() {
         assert(output_file_name.size() > 0);
         if (boost::filesystem::exists(output_file_name)) {
             consoleOutput("Output file (\"" + output_file_name + "\") already exists. Please delete/rename it,\nspecify a different output file prefix, or specify replace=yes in the config file\nor --replace yes on the command line\n");
-            std::exit(1);
+            exit(1);
+        }
+    }
+}
+
+void checkIfLoRaDFileExists() {
+    // Check to make sure LoRaD file does NOT exist, but only if replace_LoRaDfile is false
+    if (!replace_LoRaDfile) {
+        consoleOutput("Checking for existence of LoRaD file: \"" + LoRaD_file_name + "\"\n");
+        assert(LoRaD_file_name.size() > 0);
+        if (boost::filesystem::exists(LoRaD_file_name)) {
+            consoleOutput("Output file (\"" + LoRaD_file_name + "\") already exists. Please delete/rename it,\nspecify a different output file prefix, or specify replace=yes in the config file\nor --replace yes on the command line\n");
+            exit(1);
         }
     }
 }
@@ -548,31 +730,50 @@ void runMCMC() {
     // Burn-in
     if (num_burnin_iterations > 0) {
         consoleOutput("\nStarting burn-in...\n");
+
+        // Main loop
         unsigned iter = 0;
         tuning = true;
         for (; iter < num_burnin_iterations; iter++) {
+            debug_iteration = iter;
             nextIteration(iter);
         }
+
         showProgress(num_burnin_iterations);
     }
     
     // Sample
     if (num_iterations > 0) {
         consoleOutput("\nStarting MCMC sampling...\n");
-        unsigned iter = 0;
-        tuning = false;
-        output_file_name = boost::str(boost::format("%s-%.5f.txt") % output_file_prefix % ss_beta);
+
+        output_file_name = boost::str(boost::format("%s-%.9f.txt") % output_file_prefix % ss_beta);
         if (do_save_output) {
             checkIfOutputFileExists();
             outf.open(output_file_name);
         }
+
+        LoRaD_file_name = boost::str(boost::format("%s-lorad.txt") % LoRaD_file_prefix);
+        if (do_lorad) {
+            checkIfLoRaDFileExists();
+            loradf.open(LoRaD_file_name);
+        }
+        
+        // Main loop
+        unsigned iter = 0;
+        tuning = false;
         for (; iter < num_iterations; iter++) {
+            debug_iteration = iter;
             nextIteration(iter);
         }
+        
+        // Save final sampled values (these three functions are also called inside nextIteration)
         saveParameters(num_iterations);
+        saveParametersForLoRaD(num_iterations);
         showProgress(num_iterations);
         if (do_save_output)
             outf.close();
+        if (do_lorad)
+            loradf.close();
     }
 }
 
@@ -582,38 +783,52 @@ double estimateLogRatioForStone(unsigned i) {
 
     if (i < ss_restart) {
         // Need to read sampled log-likelihoods from file
-        std::string file_name = boost::str(boost::format("%s-%.5f.txt") % output_file_prefix % ss_beta);
-        std::ifstream t(file_name);
-        std::stringstream buffer;
+        string file_name = boost::str(boost::format("%s-%.5f.txt") % output_file_prefix % ss_beta);
+        ifstream t(file_name);
+        stringstream buffer;
         buffer << t.rdbuf();
-        std::string file_contents = buffer.str();
+        string file_contents = buffer.str();
         
         // Store lines from file in vector
-        std::vector<std::string> lines;
-        const std::regex rgx("[\\r\\n]+");
-        std::sregex_token_iterator iter(file_contents.begin(), file_contents.end(), rgx, -1);
-        for (std::sregex_token_iterator end; iter != end; ++iter) {
+        vector<string> lines;
+#if defined(USE_BOOST_REGEX)
+        const boost::regex rgx("[\\r\\n]+");
+        boost::sregex_token_iterator iter(file_contents.begin(), file_contents.end(), rgx, -1);
+        for (boost::sregex_token_iterator end; iter != end; ++iter) {
             lines.push_back(iter->str());
         }
+#else
+        const regex rgx("[\\r\\n]+");
+        sregex_token_iterator iter(file_contents.begin(), file_contents.end(), rgx, -1);
+        for (sregex_token_iterator end; iter != end; ++iter) {
+            lines.push_back(iter->str());
+        }
+#endif
         
         // Read values from "logL" column using regular expression
-        std::vector<std::string> parts;
+        vector<string> parts;
         for (auto line : lines) {
             // Divide line into whitespace-delimited strings, which are stored in parts
             parts.clear();
-            std::regex re("\\s+");
-            std::sregex_token_iterator i(line.begin(), line.end(), re, -1);
-            std::sregex_token_iterator j;
+#if defined(USE_BOOST_REGEX)
+            boost::regex re("\\s+");
+            boost::sregex_token_iterator i(line.begin(), line.end(), re, -1);
+            boost::sregex_token_iterator j;
+#else
+            regex re("\\s+");
+            sregex_token_iterator i(line.begin(), line.end(), re, -1);
+            sregex_token_iterator j;
+#endif
             while(i != j) {
                 parts.push_back(*i++);
             }
-            std::string logLstr = parts[1];
-            //std::string logPstr = parts[2];
-            //std::string logFstr = parts[3];
+            string logLstr = parts[1];
+            //string logPstr = parts[2];
+            //string logFstr = parts[3];
             if (logLstr != "logL") {
-                double logL = std::atof(logLstr.c_str());
-                //double logP = std::atof(logPstr.c_str());
-                //double logF = std::atof(logFstr.c_str());
+                double logL = atof(logLstr.c_str());
+                //double logP = atof(logPstr.c_str());
+                //double logF = atof(logFstr.c_str());
                 double logP = 0.0;
                 double logF = 0.0;
                 ss_terms.push_back(logL + logP - logF);
@@ -622,7 +837,7 @@ double estimateLogRatioForStone(unsigned i) {
     }
     
     // Let logeta equal the maximum value in ss_terms vector
-    auto maxit = std::max_element(ss_terms.begin(), ss_terms.end());
+    auto maxit = max_element(ss_terms.begin(), ss_terms.end());
     assert(maxit != ss_terms.end());
     double logeta = *maxit;
     //consoleOutput(boost::format("debug~~> logeta: %.5f\n") % logeta);
@@ -660,11 +875,7 @@ void mcmc() {
     runMCMC();
     
     // Determine the parameters of the reference distributions
-#if defined(USE_REGRESSION_MODEL)
-        parameterizeNormalReferenceDistributions();
-#else
-        parameterizeLognormalReferenceDistributions();
-#endif
+    parameterizeLognormalReferenceDistributions();
 }
 
 void steppingstone() {
@@ -692,23 +903,21 @@ void steppingstone() {
         runMCMC();
     
         // Determine the parameters of the reference distributions
-#if defined(USE_REGRESSION_MODEL)
-        parameterizeNormalReferenceDistributions();
-#else
         parameterizeLognormalReferenceDistributions();
-#endif
+
     }
 
     // Calculate beta values
     ss_beta_values.clear();
-    for (unsigned stone = 0; stone < nstones; stone++) {
-        ss_beta = (double)stone/(double)nstones;
+    ss_beta_values.push_back(0.0);
+    for (unsigned stone = 1; stone < nstones; stone++) {
+        ss_beta = pow((double)stone/(double)nstones, 1.0/ss_alpha);
         ss_beta_values.push_back(ss_beta);
     }
     ss_beta_values.push_back(1.0);
 
-    // Sample from power posteriors
     double_vect_t log_ratios;
+    // Sample from power posteriors
     for (unsigned stone = 0; stone < nstones; stone++) {
         ss_beta = ss_beta_values[stone];
         if (stone >= ss_restart) {
@@ -750,30 +959,25 @@ void checkBattlesFound() {
     for (auto f = battle_found.begin(); f != battle_found.end(); f++)
         nfound += f->second;
     if (nfound != which_battles.size()) {
-        std::cout << "Sorry, these battle IDs were not found in the data:" << std::endl;
+        cout << "Sorry, these battle IDs were not found in the data:" << endl;
         for (auto it = battle_found.begin(); it != battle_found.end(); it++) {
             if (it->second == 0)
-                std::cout << "  " << (it->first) << std::endl;
+                cout << "  " << (it->first) << endl;
         }
-        std::exit(1);
+        exit(1);
     }
-    
-#if defined(TAYLOR_KARLIN_CHECK)
-    assert(which_battles.size() == 1);
-    assert(which_battles[0] == 50);
-#endif
 }
 
 void savePySTAN() {
     // Output pystan code in <outfile>.py
     assert(stan == "equal" || stan == "full");
         
-    std::string output_file_name;
+    string output_file_name;
     if (stan == "equal")
         output_file_name = boost::str(boost::format("%s-equal.py") % output_file_prefix);
     else
         output_file_name = boost::str(boost::format("%s-full.py") % output_file_prefix);
-    std::ofstream pystanf(output_file_name);
+    ofstream pystanf(output_file_name);
     pystanf << "import pystan\n";
     pystanf << "import pickle\n";
     pystanf << "import os\n";
@@ -793,25 +997,25 @@ void savePySTAN() {
 
     // M is the total number of epochs over all battles
     unsigned M = 0;
-    std::vector<std::string> Kvect, y0vect, y1vect, n0start, n1start, battleids, colony0, colony1;
+    vector<string> Kvect, y0vect, y1vect, n0start, n1start, battleids, colony0, colony1;
     for (auto b = which_battles.begin(); b != which_battles.end(); b++) {
-        battleids.push_back(std::to_string(*b));
+        battleids.push_back(to_string(*b));
         colony0.push_back(boost::str(boost::format("\'%s\'") % battles[*b].first));
         colony1.push_back(boost::str(boost::format("\'%s\'") % battles[*b].second));
-        std::vector<epoch_t> & epoch_vect = epochs[*b];
+        vector<epoch_t> & epoch_vect = epochs[*b];
         unsigned nepochs = (unsigned)epoch_vect.size() - 1;
         M += nepochs;
-        Kvect.push_back(std::to_string(nepochs));
+        Kvect.push_back(to_string(nepochs));
         auto epoch = epoch_vect.begin();
-        unsigned mprev = (unsigned)std::get<1>(*epoch);
-        unsigned nprev = (unsigned)std::get<2>(*epoch);
-        n0start.push_back(std::to_string(mprev));
-        n1start.push_back(std::to_string(nprev));
+        unsigned mprev = (unsigned)get<1>(*epoch);
+        unsigned nprev = (unsigned)get<2>(*epoch);
+        n0start.push_back(to_string(mprev));
+        n1start.push_back(to_string(nprev));
         for (epoch++; epoch != epoch_vect.end(); epoch++) {
-            unsigned m = (unsigned)std::get<1>(*epoch);
-            unsigned n = (unsigned)std::get<2>(*epoch);
-            y0vect.push_back(std::to_string(mprev - m));
-            y1vect.push_back(std::to_string(nprev - n));
+            unsigned m = (unsigned)get<1>(*epoch);
+            unsigned n = (unsigned)get<2>(*epoch);
+            y0vect.push_back(to_string(mprev - m));
+            y1vect.push_back(to_string(nprev - n));
             mprev = m;
             nprev = n;
         }
@@ -874,40 +1078,40 @@ void saveRSTAN() {
     // b49n  = [25, 25, 25, 19, 17, 13, 12, 12, 11, 7, 5, 5]
     //   y1  = [     0,  0,  6,  2,  4,  1,  0,  1, 4, 2, 0]
     
-    std::string output_file_name;
+    string output_file_name;
     if (stan == "equal")
         output_file_name = boost::str(boost::format("%s-equal.R") % output_file_prefix);
     else
         output_file_name = boost::str(boost::format("%s-full.R") % output_file_prefix);
-    std::ofstream rstanf(output_file_name);
+    ofstream rstanf(output_file_name);
 
     // M is the total number of epochs over all battles
     unsigned M = 0;
-    std::vector<std::string> Kvect, y0vect, y1vect, n0start, n1start, n0vect, n1vect, battleids, filenames, colony0, colony1;
+    vector<string> Kvect, y0vect, y1vect, n0start, n1start, n0vect, n1vect, battleids, filenames, colony0, colony1;
     for (auto b = which_battles.begin(); b != which_battles.end(); b++) {
         if (stan == "equal")
-            filenames.push_back(boost::str(boost::format("\"%s-reg-equal-battle-%s-\"") % output_file_prefix % std::to_string(*b)));
+            filenames.push_back(boost::str(boost::format("\"%s-reg-equal-battle-%s-\"") % output_file_prefix % to_string(*b)));
         else
-            filenames.push_back(boost::str(boost::format("\"%s-reg-full-battle-%s-\"") % output_file_prefix % std::to_string(*b)));
-        battleids.push_back(std::to_string(*b));
+            filenames.push_back(boost::str(boost::format("\"%s-reg-full-battle-%s-\"") % output_file_prefix % to_string(*b)));
+        battleids.push_back(to_string(*b));
         colony0.push_back(boost::str(boost::format("\"%s\"") % battles[*b].first));
         colony1.push_back(boost::str(boost::format("\"%s\"") % battles[*b].second));
-        std::vector<epoch_t> & epoch_vect = epochs[*b];
+        vector<epoch_t> & epoch_vect = epochs[*b];
         unsigned nepochs = (unsigned)epoch_vect.size() - 1;
         M += nepochs;
-        Kvect.push_back(std::to_string(nepochs));
+        Kvect.push_back(to_string(nepochs));
         auto epoch = epoch_vect.begin();
-        unsigned mprev = (unsigned)std::get<1>(*epoch);
-        unsigned nprev = (unsigned)std::get<2>(*epoch);
-        n0start.push_back(std::to_string(mprev));
-        n1start.push_back(std::to_string(nprev));
+        unsigned mprev = (unsigned)get<1>(*epoch);
+        unsigned nprev = (unsigned)get<2>(*epoch);
+        n0start.push_back(to_string(mprev));
+        n1start.push_back(to_string(nprev));
         for (epoch++; epoch != epoch_vect.end(); epoch++) {
-            unsigned m = (unsigned)std::get<1>(*epoch);
-            unsigned n = (unsigned)std::get<2>(*epoch);
-            y0vect.push_back(std::to_string(mprev - m));
-            y1vect.push_back(std::to_string(nprev - n));
-            n0vect.push_back(std::to_string(mprev));
-            n1vect.push_back(std::to_string(nprev));
+            unsigned m = (unsigned)get<1>(*epoch);
+            unsigned n = (unsigned)get<2>(*epoch);
+            y0vect.push_back(to_string(mprev - m));
+            y1vect.push_back(to_string(nprev - n));
+            n0vect.push_back(to_string(mprev));
+            n1vect.push_back(to_string(nprev));
             mprev = m;
             nprev = n;
         }
@@ -1257,7 +1461,7 @@ void saveRSTAN() {
     rstanf << "print(sprintf(\"GG  = %.5f\", ggP + ggk*ggG/(ggk + 1)))\n";
 
     // Save Gelfand-Ghosh stats to a file
-    std::string ggfilename;
+    string ggfilename;
     if (stan == "equal")
         ggfilename = boost::str(boost::format("%s-reg-equal-gg.txt") % output_file_prefix);
     else
@@ -1272,12 +1476,12 @@ void saveSTAN() {
     // Output stan code in <outfile>.stan
     assert(stan == "equal" || stan == "full");
     
-    std::string output_file_name;
+    string output_file_name;
     if (stan == "equal")
         output_file_name = "equal.stan";
     else
         output_file_name = "full.stan";
-    std::ofstream stanf(output_file_name);
+    ofstream stanf(output_file_name);
     stanf << "data {\n";
     stanf << "    int<lower=0>  J;\n";
     stanf << "    int<lower=0>  M;\n";
@@ -1359,8 +1563,8 @@ void savePostPredPlotsRFiles() {
     assert(post_pred_data0[0][0].size() > 0);
     //unsigned sample_size = (unsigned)post_pred_data0[0][0].size();
 
-    std::string shellfn = boost::str(boost::format("%s-ode-rscript.sh") % output_file_prefix);
-    std::ofstream shellf(shellfn);
+    string shellfn = boost::str(boost::format("%s-ode-rscript.sh") % output_file_prefix);
+    ofstream shellf(shellfn);
     shellf << "DIR=\"$(pwd)\"\n";
     shellf << "cd $DIR\n";
 
@@ -1377,32 +1581,32 @@ void savePostPredPlotsRFiles() {
         unsigned nepochs = (unsigned)battle_epochs.size() - 1;
         
         // Store observed number of deaths for group 0 (group 1) in y0vect (y1vect)
-        std::vector<std::string> y0vect, y1vect;
-        std::vector<double> y0, y1;
-        std::vector<unsigned> n0, n1;
+        vector<string> y0vect, y1vect;
+        vector<double> y0, y1;
+        vector<unsigned> n0, n1;
         auto epoch = battle_epochs.begin();
-        unsigned mprev = (unsigned)std::get<1>(*epoch);
-        unsigned nprev = (unsigned)std::get<2>(*epoch);
+        unsigned mprev = (unsigned)get<1>(*epoch);
+        unsigned nprev = (unsigned)get<2>(*epoch);
         for (epoch++; epoch != battle_epochs.end(); epoch++) {
-            unsigned m = (unsigned)std::get<1>(*epoch);
-            unsigned n = (unsigned)std::get<2>(*epoch);
+            unsigned m = (unsigned)get<1>(*epoch);
+            unsigned n = (unsigned)get<2>(*epoch);
             n0.push_back(mprev);
             n1.push_back(nprev);
             y0.push_back(mprev - m);
             y1.push_back(nprev - n);
-            y0vect.push_back(std::to_string(mprev - m));
-            y1vect.push_back(std::to_string(nprev - n));
+            y0vect.push_back(to_string(mprev - m));
+            y1vect.push_back(to_string(nprev - n));
             mprev = m;
             nprev = n;
         }
                 
         //####################### group 0 ######################
         // Open file for group 0
-        std::string colony_name = battles[battle_id].first;
-        std::string fnprefix0 = boost::str(boost::format("%s-ode-battle-%d-%s-postpred") % output_file_prefix % battle_id % colony_name);
-        std::ofstream outf0(fnprefix0 + std::string(".R"));
+        string colony_name = battles[battle_id].first;
+        string fnprefix0 = boost::str(boost::format("%s-ode-battle-%d-%s-postpred") % output_file_prefix % battle_id % colony_name);
+        ofstream outf0(fnprefix0 + string(".R"));
         
-        shellf << boost::format("rscript %s\n") % (fnprefix0 + std::string(".R"));
+        shellf << boost::format("rscript %s\n") % (fnprefix0 + string(".R"));
 
         unsigned nominal_sample_size = 0;
         unsigned actual_sample_size = 0;
@@ -1412,11 +1616,11 @@ void savePostPredPlotsRFiles() {
         outf0 << "\n";
         outf0 << "library(ggplot2)\n";
         outf0 << "\n";
-        outf0 << boost::format("pdf(\"%s\")\n") % (fnprefix0 + std::string(".pdf"));
+        outf0 << boost::format("pdf(\"%s\")\n") % (fnprefix0 + string(".pdf"));
         outf0 << "\n";
         outf0 << "f <- c()\n";
         outf0 << "d0 <- c()\n";
-        std::vector<std::string> a0vect;
+        vector<string> a0vect;
         for (unsigned epoch = 0; epoch < nepochs; epoch++) {
             post_pred_deaths_t tmp;
             tmp.reserve(post_pred_data0[battle_index][epoch].size());
@@ -1431,7 +1635,7 @@ void savePostPredPlotsRFiles() {
             actual_sample_size += (unsigned)tmp.size();
             outf0 << boost::format("f <- c(f, rep(%d, %d))\n") % epoch % tmp.size();
             outf0 << boost::format("d0 <- c(d0, c(%s))\n") % boost::algorithm::join(tmp
-                | boost::adaptors::transformed([](double d) {return std::to_string(d);}), ",");
+                | boost::adaptors::transformed([](double d) {return to_string(d);}), ",");
 
             // GG calculations
             unsigned ggsize = (unsigned)tmp.size();
@@ -1460,7 +1664,7 @@ void savePostPredPlotsRFiles() {
             //ggG += 2.0*n0[epoch]*((ggG1 - ggG2)/(ggk + 1.0) - ggG3);
             ggG += (ggmu - y0[epoch])*(ggmu - y0[epoch]);
 
-            //std::cerr << boost::format("\n~~> group 0, epoch %d: mu = %.5f, y = %.5f, a = %.5f\n")
+            //cerr << boost::format("\n~~> group 0, epoch %d: mu = %.5f, y = %.5f, a = %.5f\n")
             //    % epoch % ggmu % y0[epoch] % gga;
         }
         outf0 << "\n";
@@ -1493,7 +1697,7 @@ void savePostPredPlotsRFiles() {
         outf0 << "p <- p + labs(title=sprintf(\"Battle %d (%s, start=%d, ODE model, post. pred., %% dropped = %.1f)\",\n";
         outf0 << boost::format("    %d,\n") % battle_id;
         outf0 << boost::format("    \"%s\",\n") % colony_name;
-        outf0 << boost::format("    %d\n,") % std::get<1>(battle_epochs[0]);
+        outf0 << boost::format("    %d\n,") % get<1>(battle_epochs[0]);
         outf0 << boost::format("    %g\n") % pct_dropped;
         outf0 << "    ), x=\"epochs\", y=\"deaths\")\n";
         outf0 << "p\n";
@@ -1504,7 +1708,7 @@ void savePostPredPlotsRFiles() {
         outf0.close();
 
         // Open text file to store data for viewing in programs other than R
-        std::ofstream outf0txt(fnprefix0 + std::string(".txt"));
+        ofstream outf0txt(fnprefix0 + string(".txt"));
         outf0txt << "obs\tepoch\tpostpred\n";
         unsigned obs0 = 0;
         for (unsigned epoch = 0; epoch < nepochs; epoch++) {
@@ -1517,10 +1721,10 @@ void savePostPredPlotsRFiles() {
         //####################### group 1 ######################
         // Open file for group 1
         colony_name = battles[battle_id].second;
-        std::string fnprefix1 = boost::str(boost::format("%s-ode-battle-%d-%s-postpred") % output_file_prefix % battle_id % colony_name);
-        std::ofstream outf1(fnprefix1 + std::string(".R"));
+        string fnprefix1 = boost::str(boost::format("%s-ode-battle-%d-%s-postpred") % output_file_prefix % battle_id % colony_name);
+        ofstream outf1(fnprefix1 + string(".R"));
         
-        shellf << boost::format("rscript %s\n") % (fnprefix1 + std::string(".R"));
+        shellf << boost::format("rscript %s\n") % (fnprefix1 + string(".R"));
 
         nominal_sample_size = 0;
         actual_sample_size = 0;
@@ -1530,11 +1734,11 @@ void savePostPredPlotsRFiles() {
         outf1 << "\n";
         outf1 << "library(ggplot2)\n";
         outf1 << "\n";
-        outf1 << boost::format("pdf(\"%s\")\n") % (fnprefix1 + std::string(".pdf"));
+        outf1 << boost::format("pdf(\"%s\")\n") % (fnprefix1 + string(".pdf"));
         outf1 << "\n";
         outf1 << "f <- c()\n";
         outf1 << "d1 <- c()\n";
-        std::vector<std::string> a1vect;
+        vector<string> a1vect;
         for (unsigned epoch = 0; epoch < nepochs; epoch++) {
             post_pred_deaths_t tmp;
             tmp.reserve(post_pred_data1[battle_index][epoch].size());
@@ -1549,7 +1753,7 @@ void savePostPredPlotsRFiles() {
             actual_sample_size += (unsigned)tmp.size();
             outf1 << boost::format("f <- c(f, rep(%d, %d))\n") % epoch % tmp.size();
             outf1 << boost::format("d1 <- c(d1, c(%s))\n") % boost::algorithm::join(tmp
-                | boost::adaptors::transformed([](double d) {return std::to_string(d);}), ",");
+                | boost::adaptors::transformed([](double d) {return to_string(d);}), ",");
 
             // GG calculations
             unsigned ggsize = (unsigned)tmp.size();
@@ -1578,7 +1782,7 @@ void savePostPredPlotsRFiles() {
             //ggG += 2.0*n1[epoch]*( (ggG1 - ggG2)/(ggk + 1.0) - ggG3);
             ggG += (ggmu - y1[epoch])*(ggmu - y1[epoch]);
 
-            //std::cerr << boost::format("\n~~> group 1, epoch %d: mu = %.5f, y = %.5f, a = %.5f\n")
+            //cerr << boost::format("\n~~> group 1, epoch %d: mu = %.5f, y = %.5f, a = %.5f\n")
             //    % epoch % ggmu % y1[epoch] % gga;
         }
         outf1 << "\n";
@@ -1611,7 +1815,7 @@ void savePostPredPlotsRFiles() {
         outf1 << "p <- p + labs(title=sprintf(\"Battle %d (%s, start=%d, ODE model, post. pred., %% dropped = %.1f)\",\n";
         outf1 << boost::format("    %d,\n") % battle_id;
         outf1 << boost::format("    \"%s\",\n") % colony_name;
-        outf1 << boost::format("    %d,\n") % std::get<2>(battle_epochs[0]);
+        outf1 << boost::format("    %d,\n") % get<2>(battle_epochs[0]);
         outf1 << boost::format("    %g\n") % pct_dropped;
         outf1 << "    ), x=\"epochs\", y=\"deaths\")\n";
         outf1 << "p\n";
@@ -1622,7 +1826,7 @@ void savePostPredPlotsRFiles() {
         outf1.close();
 
         // Open text file to store data for viewing in programs other than R
-        std::ofstream outf1txt(fnprefix1 + std::string(".txt"));
+        ofstream outf1txt(fnprefix1 + string(".txt"));
         outf1txt << "obs\tepoch\tpostpred\n";
         unsigned obs1 = 0;
         for (unsigned epoch = 0; epoch < nepochs; epoch++) {
@@ -1631,103 +1835,19 @@ void savePostPredPlotsRFiles() {
             }
         }
         outf1txt.close();
-                
-#if defined(TAYLOR_KARLIN_CHECK)
-        //####################### group tmp ######################
-        // Open file for group tmp
-        colony_name = battles[battle_id].second;
-        std::string fnprefix1tmp = boost::str(boost::format("%s-battle-%d-%s-expected") % output_file_prefix % battle_id % colony_name);
-        std::ofstream outf1tmp(fnprefix1tmp + std::string(".R"));
-
-        nominal_sample_size = 0;
-        actual_sample_size = 0;
-        
-        outf1tmp << "cwd = system('cd \"$( dirname \"$0\" )\" && pwd', intern = TRUE)\n";
-        outf1tmp << "setwd(cwd)\n";
-        outf1tmp << "\n";
-        outf1tmp << "library(ggplot2)\n";
-        outf1tmp << "\n";
-        outf1tmp << boost::format("pdf(\"%s\")\n") % (fnprefix1tmp + std::string(".pdf"));
-        outf1tmp << "\n";
-        outf1tmp << "f <- c()\n";
-        outf1tmp << "d1tmp <- c()\n";
-        for (unsigned epoch = 0; epoch < nepochs; epoch++) {
-            post_pred_deaths_t tmp;
-            tmp.reserve(post_pred_data_tmp[battle_index][epoch].size());
-            for (auto it = post_pred_data_tmp[battle_index][epoch].begin(); it != post_pred_data_tmp[battle_index][epoch].end(); it++) {
-                if (*it > -0.5)
-                    tmp.push_back(*it);
-            }
-            nominal_sample_size += (unsigned)post_pred_data_tmp[battle_index][epoch].size();
-            actual_sample_size += (unsigned)tmp.size();
-            outf1tmp << boost::format("f <- c(f, rep(%d, %d))\n") % epoch % tmp.size();
-            outf1tmp << boost::format("d1tmp <- c(d1tmp, c(%s))\n") % boost::algorithm::join(tmp
-                | boost::adaptors::transformed([](double d) {return std::to_string(d);}), ",");
-        }
-        outf1tmp << "\n";
-        
-        pct_dropped = 100.0*(nominal_sample_size - actual_sample_size)/nominal_sample_size;
-        
-        outf1tmp << "violin_data_1tmp <- data.frame(\n";
-        outf1tmp << "   name = factor(f),\n";
-        outf1tmp << "   value = d1tmp,\n";
-        outf1tmp << boost::format("   colony = rep(\"%s\", %d)\n") % colony_name % actual_sample_size;
-        outf1tmp << ")\n";
-        outf1tmp << "\n";
-        outf1tmp << "y_data_1tmp <- data.frame(\n";
-        outf1tmp << boost::format("   obs = rep(\"%s\", %d),\n") % colony_name % nepochs;
-        outf1tmp << boost::format("   x = seq(1,%d,1),\n") % nepochs;
-        outf1tmp << boost::format("   y = c(%s)\n") % boost::algorithm::join(y1vect,",");
-        outf1tmp << ")\n";
-        outf1tmp << "\n";
-        outf1tmp << "p <- ggplot()\n";
-        outf1tmp << "p <- p + geom_violin(data=violin_data_1tmp, fill=\"brown\", aes(x=name, y=value))\n";
-        outf1tmp << "p <- p + geom_line(data=y_data_1tmp, color=\"orange\", aes(x=x, y=y))\n";
-        outf1tmp << "p <- p + geom_point(data=y_data_1tmp, color=\"orange\", aes(x=x, y=y))\n";
-        outf1tmp << "p <- p + labs(title=sprintf(\"Battle %d (%s, start=%d, ODE model, expected deaths, %%dropped = %.1f)\",\n";
-        outf1tmp << boost::format("    %d,\n") % battle_id;
-        outf1tmp << boost::format("    \"%s\",\n") % colony_name;
-        outf1tmp << boost::format("    %d,\n") % std::get<2>(battle_epochs[0]);
-        outf1tmp << boost::format("    %g\n") % pct_dropped;
-        outf1tmp << "    ), x=\"epochs\", y=\"deaths\")\n";
-        outf1tmp << "p\n";
-        outf1tmp << "\n";
-        outf1tmp << "dev.off()\n";
-        
-        // Close file
-        outf1tmp.close();
-        
-        // Open text file to store data for viewing in programs other than R
-        std::ofstream outf1tmptxt(fnprefix1tmp + std::string(".txt"));
-        outf1tmptxt << "obs\tepoch\tmean\tvariance\n";
-        unsigned obs1tmp = 0;
-        for (unsigned epoch = 0; epoch < nepochs; epoch++) {
-            unsigned num_elements = (unsigned)post_pred_data_tmp[battle_index][epoch].size();
-            for (unsigned s = 0; s < num_elements; s++) {
-                outf1tmptxt << boost::format("%d\t%d\t%.3f\t%.3f\n")
-                                    % (++obs1tmp)
-                                    % (epoch+1)
-                                    % post_pred_data_tmp[battle_index][epoch][s]
-                                    % post_pred_data_tmp2[battle_index][epoch][s]
-                                ;
-            }
-        }
-        outf1tmptxt.close();
-        
-#endif
-        
+                        
         battle_index++;
     }
 
     // Report GG calculations
     double GG = ggP + ggk*ggG/(ggk + 1.0);
-    std::cerr << boost::format("GGp = %.5f\n") % ggP;
-    std::cerr << boost::format("GGg = %.5f\n") % ggG;
-    std::cerr << boost::format("k   = %.5f\n") % ggk;
-    std::cerr << boost::format("GG  = %.5f\n") % GG;
+    cerr << boost::format("GGp = %.5f\n") % ggP;
+    cerr << boost::format("GGg = %.5f\n") % ggG;
+    cerr << boost::format("k   = %.5f\n") % ggk;
+    cerr << boost::format("GG  = %.5f\n") % GG;
     
-    std::string ggfilename = boost::str(boost::format("%s-ode-gg.txt") % output_file_prefix);
-    std::ofstream ggf(ggfilename);
+    string ggfilename = boost::str(boost::format("%s-ode-gg.txt") % output_file_prefix);
+    ofstream ggf(ggfilename);
     ggf << boost::format("GGp = %.5f\n") % ggP;
     ggf << boost::format("GGg = %.5f\n") % ggG;
     ggf << boost::format("k   = %.5f\n") % ggk;
@@ -1736,30 +1856,6 @@ void savePostPredPlotsRFiles() {
     
     shellf.close();
 }
-
-#if defined(TALLY_DEATH_ORDER)
-void debugShowOrderTally() {
-    // death_orderings is a map with keys equal to battle-epoch pairs and
-    // values equal to maps relating ordering strings (keys) to counts (values)
-    consoleOutput("\nReport on death orderings for each battle and epoch:");
-
-    // Report counts for each battle and epoch
-    for (auto epoch_iter = death_orderings.begin(); epoch_iter != death_orderings.end(); epoch_iter++) {
-        auto key          = epoch_iter->first;
-        auto value        = epoch_iter->second;
-
-        battleid_t battle = key.first;
-        unsigned epoch    = key.second;
-        consoleOutput(boost::format("\n  Battle %d, epoch %d:") % battle % epoch);
-
-        for (auto order_iter = value.begin(); order_iter != value.end(); order_iter++) {
-            consoleOutput(boost::format("\n  %12d %s") % order_iter->second % order_iter->first);
-        }
-    }
-    consoleOutput("\n");
-}
-#endif
-
 
 void run() {
     battles.clear();
@@ -1787,10 +1883,6 @@ void run() {
                 savePostPredPlotsRFiles();
         }
     }
-    
-#if defined(TALLY_DEATH_ORDER)
-    debugShowOrderTally();
-#endif
 }
 
 int main(int argc, char * argv[]) {
@@ -1802,23 +1894,31 @@ int main(int argc, char * argv[]) {
         run();
     }
     catch(XBadBattle & x) {
-        std::cerr << "BadBattle: battle should end immediately if one side or the other is extirpated" << std::endl;
-        std::cerr << "Aborted." << std::endl;
+        cerr << "BadBattle: battle should end immediately if one side or the other is extirpated" << endl;
+        cerr << "Aborted." << endl;
     }
     catch(XImpossibleBattle & x) {
-        std::cerr << "ImpossibleBattle: number of combatants should not increase during battle" << std::endl;
-        std::cerr << "Aborted." << std::endl;
+        cerr << "ImpossibleBattle: number of combatants should not increase during battle" << endl;
+        cerr << "Aborted." << endl;
     }
     catch(XBadRestart & x) {
-        std::cerr << "BadRestart: ssrestart specified but no reference distribution found" << std::endl;
-        std::cerr << "Aborted." << std::endl;
+        cerr << "BadRestart: ssrestart specified but no reference distribution found" << endl;
+        cerr << "Aborted." << endl;
     }
-    catch(std::exception & x) {
-        std::cerr << "Exception: " << x.what() << std::endl;
-        std::cerr << "Aborted." << std::endl;
+    catch(XBadLogTransform & x) {
+        cerr << "BadLogTransform: attempted to log-transform a parameter whose value is less than or equal to zero" << endl;
+        cerr << "Aborted." << endl;
+    }
+    catch(XBadSojourn & x) {
+        cerr << "XBadSojourn: zero-length interval between 2 deaths" << endl;
+        cerr << "Aborted." << endl;
+    }
+    catch(exception & x) {
+        cerr << "Exception: " << x.what() << endl;
+        cerr << "Aborted." << endl;
     }
     catch(...) {
-        std::cerr << "Exception of unknown type!\n";
+        cerr << "Exception of unknown type!\n";
     }
     
     screenf.close();

@@ -42,7 +42,7 @@ namespace termite {
             double                          gamma(double shape, double scale);
             double                          logUniform();
             
-            typedef std::shared_ptr<Lot>    SharedPtr;
+            typedef shared_ptr<Lot>    SharedPtr;
 
         private:
         
@@ -53,10 +53,10 @@ namespace termite {
 
             unsigned                                        _seed;
             boost::mt19937                                  _generator;
-            std::shared_ptr<uniform_variate_generator_t>    _uniform_variate_generator;
-            std::shared_ptr<normal_variate_generator_t>     _normal_variate_generator;
-            std::shared_ptr<gamma_variate_generator_t>      _gamma_variate_generator;
-            std::shared_ptr<uniform_int_generator_t>        _uniform_int_generator;
+            shared_ptr<uniform_variate_generator_t>    _uniform_variate_generator;
+            shared_ptr<normal_variate_generator_t>     _normal_variate_generator;
+            shared_ptr<gamma_variate_generator_t>      _gamma_variate_generator;
+            shared_ptr<uniform_int_generator_t>        _uniform_int_generator;
 
             double                                          _gamma_shape;
             int                                             _low;
@@ -66,16 +66,16 @@ namespace termite {
     // member function bodies go here
     
     inline Lot::Lot() : _seed(0), _gamma_shape(1.0), _low(0), _high(100) {
-        //std::cout << "Constructing a Lot" << std::endl;
-        _generator.seed(static_cast<unsigned int>(std::time(0)));
-        _uniform_variate_generator = std::shared_ptr<uniform_variate_generator_t>(new uniform_variate_generator_t(_generator, boost::random::uniform_01<>()));
-        _normal_variate_generator = std::shared_ptr<normal_variate_generator_t>(new normal_variate_generator_t(_generator, boost::random::normal_distribution<>()));
-        _gamma_variate_generator = std::shared_ptr<gamma_variate_generator_t>(new gamma_variate_generator_t(_generator, boost::random::gamma_distribution<>(_gamma_shape)));
-        _uniform_int_generator = std::shared_ptr<uniform_int_generator_t>(new uniform_int_generator_t(_generator, boost::random::uniform_int_distribution<>(_low, _high)));
+        //cout << "Constructing a Lot" << endl;
+        _generator.seed(static_cast<unsigned int>(time(0)));
+        _uniform_variate_generator = shared_ptr<uniform_variate_generator_t>(new uniform_variate_generator_t(_generator, boost::random::uniform_01<>()));
+        _normal_variate_generator = shared_ptr<normal_variate_generator_t>(new normal_variate_generator_t(_generator, boost::random::normal_distribution<>()));
+        _gamma_variate_generator = shared_ptr<gamma_variate_generator_t>(new gamma_variate_generator_t(_generator, boost::random::gamma_distribution<>(_gamma_shape)));
+        _uniform_int_generator = shared_ptr<uniform_int_generator_t>(new uniform_int_generator_t(_generator, boost::random::uniform_int_distribution<>(_low, _high)));
     }
         
     inline Lot::~Lot() {
-        //std::cout << "Destroying a Lot" << std::endl;
+        //cout << "Destroying a Lot" << endl;
         _uniform_variate_generator.reset();
         _normal_variate_generator.reset();
         _gamma_variate_generator.reset();
@@ -84,7 +84,7 @@ namespace termite {
         
     inline void Lot::setSeed(unsigned seed) {
         _seed = seed;
-        _generator.seed(_seed > 0 ? _seed : static_cast<unsigned int>(std::time(0)));
+        _generator.seed(_seed > 0 ? _seed : static_cast<unsigned int>(time(0)));
     }
         
     inline double Lot::uniform() {
@@ -98,7 +98,7 @@ namespace termite {
         double u = (*_uniform_variate_generator)();
         while (u <= 0.0)
             u = (*_uniform_variate_generator)();
-        return std::log(u);
+        return log(u);
     }
     
     inline double Lot::normal() {
